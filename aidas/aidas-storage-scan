@@ -1,0 +1,291 @@
+#!/usr/bin/python3 -I
+"""Hourly read-only storage scan for the AIDAS server (backend of the storage dashboard).
+
+Installed at /usr/local/sbin/aidas-storage-scan and run by root from
+/etc/cron.d/aidas-storage. It only reads (du, find, repquota, statvfs) and writes a
+single file of aggregated totals -- no file paths -- to
+/mnt/TrueNAS/yejoon/aidas-storage/latest.json (TrueNAS NFS share). publish.py, run from
+yejoon's crontab on aidas, publishes it.
+
+Spaces and how usage is attributed:
+  /             per user, by file owner: /home, /tmp, /var/tmp, other; plus the quota
+  /mnt/nvme0-2  per user data folder (/mnt/data/<user>): the whole folder, any owner
+  /mnt/nvme3    per user: .cache/<user>, miniconda3/userenvs/<user>,
+                .singularity_cachedir/<user>, and singularity-images entries they own;
+                docker, the conda base install and root's files are "common"
+"""
+import argparse
+import concurrent.futures as cf
+import datetime
+import json
+import os
+import pwd
+import re
+import subprocess
+import sys
+import threading
+import time
+
+ROOT_FS = "/"
+ROOT_BUCKETS = (("home", "/home"), ("tmp", "/tmp"), ("var_tmp", "/var/tmp"))
+DATA_DISKS = ("/mnt/nvme0", "/mnt/nvme1", "/mnt/nvme2")
+SHARED_DISK = "/mnt/nvme3"
+OUT_MOUNT = "/mnt/TrueNAS"
+DEFAULT_OUT = "/mnt/TrueNAS/yejoon/aidas-storage/latest.json"
+DU, FIND, REPQUOTA = "/usr/bin/du", "/usr/bin/find", "/usr/sbin/repquota"
+ENV = {"PATH": "/usr/sbin:/usr/bin:/sbin:/bin", "LC_ALL": "C"}
+
+
+def human_users():
+    """uid -> name for regular login accounts."""
+    return {p.pw_uid: p.pw_name for p in pwd.getpwall() if 1000 <= p.pw_uid < 60000}
+
+
+def fs_usage(path):
+    st = os.statvfs(path)
+    return {
+        "size": st.f_blocks * st.f_frsize,
+        "used": (st.f_blocks - st.f_bfree) * st.f_frsize,
+        "avail": st.f_bavail * st.f_frsize,
+    }
+
+
+def du(path):
+    """(allocated bytes, error count) for path; stays on one filesystem, never follows symlinks."""
+    p = subprocess.run([DU, "-sxk", "--", path], stdout=subprocess.PIPE,
+                       stderr=subprocess.PIPE, env=ENV)
+    kb = 0
+    for line in p.stdout.splitlines():
+        kb = int(line.split(b"\t", 1)[0])
+    return kb * 1024, len(p.stderr.splitlines())
+
+
+def entries(path):
+    with os.scandir(path) as it:
+        return sorted(it, key=lambda e: e.name)
+
+
+# ---------------------------------------------------------------- /  (by file owner)
+
+def _find_owner_usage(args, add, seen):
+    """Stream `find ... -printf` and call add(uid, bytes). Returns error count."""
+    cmd = [FIND] + args + ["-printf", "%U %b %n %y %i\\0"]
+    p = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=ENV)
+    errs = []
+    t = threading.Thread(target=lambda: errs.append(sum(1 for _ in p.stderr)))
+    t.start()
+    buf = b""
+    for chunk in iter(lambda: p.stdout.read(1 << 20), b""):
+        buf += chunk
+        *records, buf = buf.split(b"\0")
+        for r in records:
+            uid, blocks, nlink, ftype, ino = r.split(b" ")
+            if ftype != b"d" and nlink != b"1":  # count hard-linked files once
+                if ino in seen:
+                    continue
+                seen.add(ino)
+            add(int(uid), int(blocks) * 512)
+    p.wait()
+    t.join()
+    return errs[0] if errs else 0
+
+
+def scan_root(users, quota):
+    names = users
+    result, system, errors, seen = {}, {}, 0, set()
+    for bucket, top in ROOT_BUCKETS:
+        def add(uid, size, bucket=bucket):
+            tgt = result.setdefault(names[uid], {}) if uid in names else system
+            tgt[bucket] = tgt.get(bucket, 0) + size
+        errors += _find_owner_usage([top, "-xdev"], add, seen)
+
+    def add_other(uid, size):
+        tgt = result.setdefault(names[uid], {}) if uid in names else system
+        tgt["other"] = tgt.get("other", 0) + size
+    prune = []
+    for _, top in ROOT_BUCKETS:
+        prune += (["-o"] if prune else []) + ["-path", top]
+    errors += _find_owner_usage([ROOT_FS, "-xdev", "("] + prune + [")", "-prune", "-o"],
+                                add_other, seen)
+
+    for name, q in (quota or {}).items():
+        result.setdefault(name, {}).update(quota_used=q["used"], quota_hard=q["hard"])
+    fs = fs_usage(ROOT_FS)
+    measured = sum(v for d in list(result.values()) + [system]
+                   for k, v in d.items() if not k.startswith("quota"))
+    return {"fs": fs, "users": result, "system": system,
+            "unaccounted": max(fs["used"] - measured, 0), "errors": errors,
+            "quota_available": quota is not None}
+
+
+def quotas(names):
+    """name -> {used, hard} from repquota on / (bytes). None if unavailable (needs root)."""
+    p = subprocess.run([REPQUOTA, "-u", ROOT_FS], stdout=subprocess.PIPE,
+                       stderr=subprocess.PIPE, env=ENV)
+    if p.returncode != 0:
+        return None
+    out = {}
+    for line in p.stdout.decode(errors="replace").splitlines():
+        m = re.match(r"^(\S+)\s+[-+]{2}\s+(\d+)\s+(\d+)\s+(\d+)", line)
+        if m and m.group(1) in names:
+            out[m.group(1)] = {"used": int(m.group(2)) * 1024, "hard": int(m.group(4)) * 1024}
+    return out
+
+
+# ---------------------------------------------------------------- data disks (by folder)
+
+def scan_data_disk(disk, names):
+    if not os.path.ismount(disk):
+        return {"mounted": False}
+    users, other, errors = {}, 0, 0
+    for e in entries(disk):
+        size, err = du(e.path)
+        errors += err
+        if e.name in names and e.is_dir(follow_symlinks=False):
+            users[e.name] = users.get(e.name, 0) + size
+        else:
+            other += size
+    fs = fs_usage(disk)
+    measured = sum(users.values()) + other
+    return {"mounted": True, "fs": fs, "users": users, "other": other,
+            "unaccounted": max(fs["used"] - measured, 0), "errors": errors}
+
+
+# ---------------------------------------------------------------- shared disk (nvme3)
+
+def scan_shared_disk(disk, users):
+    if not os.path.ismount(disk):
+        return {"mounted": False}
+    names = set(users.values())
+    per = {}
+    common = {"docker": 0, "conda_base": 0, "root": 0, "other": 0}
+    errors = 0
+
+    def add_user(name, key, size):
+        d = per.setdefault(name, {"cache": 0, "conda": 0, "singularity": 0})
+        d[key] += size
+
+    def measure(path):
+        nonlocal errors
+        size, err = du(path)
+        errors += err
+        return size
+
+    def per_name_dir(path, key):
+        """Sub-folders named after a user belong to that user; 'root' and others are common."""
+        for e in entries(path):
+            size = measure(e.path)
+            if e.name in names and e.is_dir(follow_symlinks=False):
+                add_user(e.name, key, size)
+            else:
+                common["root" if e.name == "root" else "other"] += size
+
+    for e in entries(disk):
+        is_dir = e.is_dir(follow_symlinks=False)
+        if e.name == ".cache" and is_dir:
+            per_name_dir(e.path, "cache")
+        elif e.name == ".singularity_cachedir" and is_dir:
+            per_name_dir(e.path, "singularity")
+        elif e.name == "miniconda3" and is_dir:
+            for c in entries(e.path):
+                if c.name == "userenvs" and c.is_dir(follow_symlinks=False):
+                    per_name_dir(c.path, "conda")
+                else:
+                    common["conda_base"] += measure(c.path)
+        elif e.name == "singularity-images" and is_dir:
+            for c in entries(e.path):  # images are attributed to their owner
+                uid = c.stat(follow_symlinks=False).st_uid
+                size = measure(c.path)
+                if uid in users:
+                    add_user(users[uid], "singularity", size)
+                else:
+                    common["root" if uid == 0 else "other"] += size
+        elif e.name == "docker-data" and is_dir:
+            common["docker"] += measure(e.path)
+        else:
+            common["other"] += measure(e.path)
+
+    fs = fs_usage(disk)
+    measured = sum(sum(d.values()) for d in per.values()) + sum(common.values())
+    return {"mounted": True, "fs": fs, "users": per, "common": common,
+            "unaccounted": max(fs["used"] - measured, 0), "errors": errors}
+
+
+# ---------------------------------------------------------------- main
+
+def _write_atomic(path, text):
+    d = os.path.dirname(path)
+    if not os.path.isdir(d):
+        os.mkdir(d, 0o775)  # only the last folder; never recreate a missing parent
+    tmp = os.path.join(d, ".latest.json.tmp")
+    with open(tmp, "w") as f:
+        f.write(text)
+    os.chmod(tmp, 0o644)
+    os.replace(tmp, path)
+
+
+def write_output(path, text):
+    """Atomic write. The output lives on the TrueNAS NFS share, so refuse when the share is not
+    mounted (we would write onto / under the bare mount point). If the server squashes root,
+    retry as the owner of the output folder."""
+    if path.startswith(OUT_MOUNT + "/") and not os.path.ismount(OUT_MOUNT):
+        raise SystemExit(f"{OUT_MOUNT} is not mounted; not writing {path}")
+    try:
+        _write_atomic(path, text)
+    except PermissionError:
+        if os.geteuid() != 0:
+            raise
+        d = os.path.dirname(path)
+        st = os.stat(d if os.path.isdir(d) else os.path.dirname(d))
+        os.setegid(st.st_gid)
+        os.seteuid(st.st_uid)
+        try:
+            _write_atomic(path, text)
+        finally:
+            os.seteuid(0)
+            os.setegid(0)
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    ap.add_argument("--out", default=DEFAULT_OUT, help="output file, or - for stdout")
+    args = ap.parse_args()
+
+    t0 = time.time()
+    users = human_users()
+    names = set(users.values())
+    quota = quotas(names)
+    with cf.ThreadPoolExecutor(max_workers=5) as ex:
+        f_root = ex.submit(scan_root, users, quota)
+        f_data = {d: ex.submit(scan_data_disk, d, names) for d in DATA_DISKS}
+        f_shared = ex.submit(scan_shared_disk, SHARED_DISK, users)
+        root = f_root.result()
+        data = {d: f.result() for d, f in f_data.items()}
+        shared = f_shared.result()
+
+    errors = root["errors"] + shared.get("errors", 0) + sum(d.get("errors", 0) for d in data.values())
+    as_root = os.geteuid() == 0
+    doc = {
+        "schema": 1,
+        "host": os.uname().nodename,
+        "generated_at": datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds"),
+        "scan_seconds": round(time.time() - t0, 1),
+        "as_root": as_root,
+        "complete": as_root and errors == 0 and quota is not None,
+        "errors": errors,
+        "users": sorted(names),
+        "root_fs": root,
+        "data_disks": data,
+        "shared_disk": {SHARED_DISK: shared},
+    }
+    text = json.dumps(doc, indent=1, sort_keys=True)
+    if args.out == "-":
+        sys.stdout.write(text + "\n")
+    else:
+        write_output(args.out, text + "\n")
+    print(f"{doc['generated_at']} scan ok in {doc['scan_seconds']}s, errors={errors}, "
+          f"complete={doc['complete']}", file=sys.stderr)
+
+
+if __name__ == "__main__":
+    main()

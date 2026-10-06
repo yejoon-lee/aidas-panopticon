@@ -1,0 +1,5 @@
+# AIDAS storage dashboard: hourly read-only usage scan.
+# Source: https://github.com/yejoon-lee/aidas-panopticon (aidas/). Remove with aidas/uninstall.sh.
+SHELL=/bin/sh
+PATH=/usr/sbin:/usr/bin:/sbin:/bin
+5 * * * * root flock -n /run/aidas-storage-scan.lock timeout -k 2m 50m nice -n 19 /usr/local/sbin/aidas-storage-scan >>/var/log/aidas-storage-scan.log 2>&1
