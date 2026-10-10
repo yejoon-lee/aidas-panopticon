@@ -1,0 +1,468 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex, nofollow">
+<title>AIDAS-A100 storage panopticon</title>
+<style>
+:root { --fg:#1f2328; --muted:#656d76; --bg:#ffffff; --card:#f6f8fa; --border:#d0d7de; --track:#e6e8eb;
+        --bar:#3b82f6; --warn:#d97706; --crit:#dc2626; --good:#16a34a;
+        --c-root:#4b535d; --c-data0:#08519c; --c-data1:#3182bd; --c-data2:#6baed6; --c-shared:#e69f00; }
+@media (prefers-color-scheme: dark) {
+  :root { --fg:#e6edf3; --muted:#8d96a0; --bg:#0d1117; --card:#161b22; --border:#30363d; --track:#30363d;
+          --bar:#4c8df6; --warn:#f0a020; --crit:#f85149; --good:#3fb950;
+          --c-root:#c9d1d9; --c-data0:#2f7fc1; --c-data1:#5fa8dc; --c-data2:#a2cdee; --c-shared:#e69f00; }
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--fg);
+       font: 14px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", "Apple SD Gothic Neo", "Noto Sans KR", sans-serif; }
+main { max-width: 1080px; margin: 0 auto; padding: 24px 16px 48px; }
+h1 { font-size: 22px; margin: 0 0 2px; }
+h2 { font-size: 17px; margin: 34px 0 2px; }
+h3 { font-size: 15px; margin: 0; }
+.sub, .note { color: var(--muted); }
+.sub { margin: 0 0 8px; }
+.note { font-size: 12px; margin: 4px 0 0; }
+.banner { padding: 8px 12px; border-radius: 6px; margin: 12px 0 0; border: 1px solid var(--warn); color: var(--warn); }
+.cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(190px, 1fr)); gap: 10px; margin-top: 14px; }
+.card { background: var(--card); border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px; }
+a.card { display: block; color: inherit; text-decoration: none; transition: border-color .15s, box-shadow .15s, transform .15s; }
+a.card:hover, a.card:focus-visible { border-color: var(--bar); box-shadow: 0 2px 10px rgba(0, 0, 0, .08); transform: translateY(-1px); outline: none; }
+.card .more { display: inline-flex; align-items: center; gap: 3px; margin-top: 6px; font-size: 12px; font-weight: 600; color: var(--bar); }
+.card .more svg { display: block; }
+html { scroll-behavior: smooth; }
+.anchor { scroll-margin-top: 12px; margin: 0 -8px; padding: 0 8px 4px; border-radius: 8px; }
+.anchor:target { animation: flash 2s ease-out; }
+@keyframes flash { 0%, 35% { background: rgba(59, 130, 246, .13); } 100% { background: transparent; } }
+.tip { border-bottom: 1px dotted currentColor; cursor: help; }
+.tip:focus-visible { outline: 2px solid var(--bar); outline-offset: 2px; border-radius: 2px; }
+.help { display: inline-flex; align-items: center; justify-content: center; width: 15px; height: 15px; margin-left: 6px; flex: none;
+        border: 1px solid currentColor; border-radius: 50%; color: var(--muted); cursor: help; user-select: none; vertical-align: 1px;
+        font: 600 10px/1 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+.help:hover, .help:focus-visible { color: var(--bar); outline: none; }
+#tooltip { position: fixed; z-index: 10; max-width: 340px; padding: 7px 10px; border-radius: 6px; background: var(--fg); color: var(--bg);
+           font-size: 12px; line-height: 1.45; text-align: left; white-space: pre-line; pointer-events: none; opacity: 0; transition: opacity .12s; }
+#tooltip.show { opacity: 1; }
+.usage { margin: 8px 0 2px; }
+.usage-text { display: flex; justify-content: space-between; gap: 12px; font-size: 13px; color: var(--muted); }
+.usage-text b { color: var(--fg); font-weight: 600; }
+.usage-text b.pct.warn { color: var(--warn); } .usage-text b.pct.crit { color: var(--crit); }
+.stack { display: flex; height: 14px; background: var(--track); border-radius: 4px; overflow: hidden; margin-top: 4px; }
+.stack .seg { flex: none; height: 100%; box-shadow: inset -1px 0 0 var(--bg); }
+.stack .seg:hover { filter: brightness(1.15); }
+.sw { display: inline-block; width: 9px; height: 9px; border-radius: 2px; margin-right: 7px; }
+/* easter egg: click "panopticon" in the title */
+main { position: relative; z-index: 1; }
+.pano-word { cursor: pointer; border-radius: 3px; transition: color .6s; }
+.pano-word:focus-visible { outline: 2px solid var(--bar); outline-offset: 2px; }
+body.panopticon .pano-word { color: var(--bar); }
+#pano-bg { position: fixed; inset: 0; z-index: 0; pointer-events: none; overflow: hidden; color: var(--fg);
+           opacity: 0; transition: opacity 1.2s ease; }
+body.panopticon #pano-bg { opacity: .08; }
+@media (prefers-color-scheme: dark) { body.panopticon #pano-bg { opacity: .11; } }
+#pano-bg svg { position: absolute; left: 50%; top: 50%; width: max(112vmin, 760px); height: auto; transform: translate(-50%, -50%); }
+.card .role { color: var(--muted); font-size: 12px; }
+.card .pct { font-size: 22px; font-weight: 600; margin-top: 2px; }
+.card .detail { color: var(--muted); font-size: 12px; }
+.track { height: 6px; background: var(--track); border-radius: 3px; overflow: hidden; margin: 6px 0 4px; }
+.fill { height: 100%; background: var(--bar); }
+.fill.warn { background: var(--warn); } .fill.crit { background: var(--crit); }
+.pct.warn { color: var(--warn); } .pct.crit { color: var(--crit); }
+.scroll { overflow-x: auto; }
+table { width: 100%; border-collapse: collapse; margin-top: 8px; font-variant-numeric: tabular-nums; }
+th, td { padding: 5px 8px; border-bottom: 1px solid var(--border); text-align: right; white-space: nowrap; }
+th { color: var(--muted); font-weight: 500; font-size: 12px; }
+th:first-child, td:first-child { text-align: left; }
+tr.muted td { color: var(--muted); }
+tr.first-common td { border-top: 2px solid var(--border); }
+.minibar { display: flex; align-items: center; gap: 8px; justify-content: flex-end; }
+.minibar .track { width: 110px; margin: 0; flex: none; }
+.up { color: var(--crit); } .down { color: var(--good); } .zero { color: var(--muted); }
+.disk { margin-top: 18px; }
+.chart { margin-top: 10px; }
+.chart > svg { width: 100%; height: auto; display: block; }
+.chart text { fill: var(--muted); font-size: 11px; }
+.chart .grid { stroke: var(--border); stroke-width: 1; }
+.legend { display: flex; flex-wrap: wrap; gap: 8px 22px; font-size: 12px; color: var(--muted); margin-top: 6px; }
+.legend .lg-group { display: inline-flex; flex-wrap: wrap; align-items: center; gap: 4px 12px; }
+.legend .lg-group b { color: var(--fg); font-weight: 600; }
+.legend .lg { display: inline-flex; align-items: center; gap: 5px; }
+.legend .lg svg { display: block; overflow: visible; }
+.g-root { --c: var(--c-root); } .g-shared { --c: var(--c-shared); }
+.g-data.d0 { --c: var(--c-data0); } .g-data.d1 { --c: var(--c-data1); } .g-data.d2 { --c: var(--c-data2); }
+.chart .ln { fill: none; stroke: var(--c); stroke-width: 2; }
+.chart .mk { fill: var(--c); }
+.chart .mk.ring { fill: var(--bg); stroke: var(--c); stroke-width: 1.8; }
+.chart .hit { fill: none; stroke: transparent; stroke-width: 14; pointer-events: stroke; cursor: crosshair; }
+.chart .series { transition: opacity .15s; }
+.chart svg.hovering .series { opacity: .2; }
+.chart svg.hovering .series.on { opacity: 1; }
+.chart .series.on .ln { stroke-width: 3; }
+code { font-size: 12px; }
+</style>
+</head>
+<body>
+<main id="app"><p>Loading…</p></main>
+<script id="data" type="application/json">{"latest":{"as_root":true,"complete":true,"data_disks":{"/mnt/nvme0":{"errors":0,"fs":{"avail":120609468416,"size":3779302981632,"used":3466638938112},"mounted":true,"other":16384,"unaccounted":126976,"users":{"csjihwanh":1768700882944,"jihoonkwon":169657208832,"jusang":610659340288,"kdg6245":917621362688}},"/mnt/nvme1":{"errors":0,"fs":{"avail":1033252827136,"size":3779302981632,"used":2553995579392},"mounted":true,"other":614400,"unaccounted":24576,"users":{"jake630":80933851136,"jhkim":725133479936,"mintaek":214185922560,"minu0426":1401158602752,"yejoon":132583084032}},"/mnt/nvme2":{"errors":0,"fs":{"avail":328074330112,"size":3779302981632,"used":3259174076416},"mounted":true,"other":16384,"unaccounted":901120,"users":{"hgkim":285559115776,"hj153lee":859868352512,"sieun":95812521984,"skjinlee":415018188800,"steve97":706601648128,"yongha":453826904064,"yunseok":442486427648}}},"errors":0,"generated_at":"2026-10-10T19:06:09+00:00","host":"aidas","root_fs":{"errors":0,"fs":{"avail":63472115712,"size":452305682432,"used":365782458368},"quota_available":true,"system":{"home":31969280,"other":34244403200,"tmp":11726848,"var_tmp":69632},"unaccounted":4276674560,"users":{"csjihwanh":{"home":32258310144,"other":4096,"quota_hard":37580963840,"quota_used":32312020992,"tmp":53706752},"gunchoi":{"home":17107771392,"other":4096,"quota_hard":37580963840,"quota_used":17112477696,"tmp":4702208},"hgkim":{"home":7195394048,"other":4096,"quota_hard":37580963840,"quota_used":7196225536,"tmp":827392},"hj153lee":{"home":25386098688,"other":4096,"quota_hard":37580963840,"quota_used":28792594432,"tmp":3406520320},"hoeun":{"home":1574436864,"other":4096,"quota_hard":37580963840,"quota_used":1574440960},"jake630":{"home":28388745216,"other":4096,"quota_hard":37580963840,"quota_used":28388749312},"jhkim":{"home":26415857664,"other":40960,"quota_hard":37580963840,"quota_used":27402727424,"tmp":676040704,"var_tmp":12288},"jihoonkwon":{"home":5058560,"quota_hard":37580963840,"quota_used":58216448,"tmp":53157888},"jusang":{"home":10776944640,"other":4096,"quota_hard":37580963840,"quota_used":10798264320,"tmp":21315584},"kdg6245":{"home":18579537920,"other":4096,"quota_hard":37580963840,"quota_used":18684968960,"tmp":105426944},"mintaek":{"home":8663453696,"other":4096,"quota_hard":37580963840,"quota_used":8671617024,"tmp":8179712},"minu0426":{"home":22376497152,"other":4096,"quota_hard":37580963840,"quota_used":22377099264,"tmp":598016},"sieun":{"home":24837419008,"other":16384,"quota_hard":37580963840,"quota_used":24945647616,"tmp":108195840},"skjinlee":{"home":9414393856,"other":576299008,"quota_hard":37580963840,"quota_used":10877693952,"tmp":886992896,"var_tmp":8192},"steve97":{"home":17990004736,"other":4096,"quota_hard":37580963840,"quota_used":18258567168,"tmp":23855104},"wjkim":{"home":6410051584,"other":4096,"quota_hard":37580963840,"quota_used":6410403840,"tmp":348160},"woohyeon":{"home":7928385536,"other":4096,"quota_hard":37580963840,"quota_used":7929466880,"tmp":1118208},"yejoon":{"home":17458368512,"other":4456448,"quota_hard":37580963840,"quota_used":17080254464,"tmp":97599488},"yongha":{"home":11168538624,"other":4096,"quota_hard":37580963840,"quota_used":11176542208,"tmp":7999488},"yunseok":{"home":26681675776,"other":4096,"quota_hard":37580963840,"quota_used":26069520384,"tmp":563191808}}},"scan_seconds":67.5,"schema":1,"shared_disk":{"/mnt/nvme3":{"common":{"conda_base":2980356096,"docker":174769475584,"other":18792448,"root":76132626432},"errors":0,"fs":{"avail":30389837824,"size":3779169796096,"used":3556732149760},"mounted":true,"unaccounted":0,"users":{"csjihwanh":{"cache":21914009600,"conda":35533922304,"singularity":45056},"gunchoi":{"cache":64181137408,"conda":40203698176,"singularity":4096},"hgkim":{"cache":2753384448,"conda":46154108928,"singularity":27133583360},"hj153lee":{"cache":54811709440,"conda":68878848000,"singularity":4955107328},"hoeun":{"cache":5198938112,"conda":31663964160,"singularity":783593472},"jake630":{"cache":18369159168,"conda":17961615360,"singularity":4096},"jhkim":{"cache":240225087488,"conda":49445965824,"singularity":32079806464},"jihoonkwon":{"cache":4096,"conda":0,"singularity":4096},"jusang":{"cache":38337044480,"conda":62806786048,"singularity":4096},"kdg6245":{"cache":134381129728,"conda":33798012928,"singularity":14357180416},"mintaek":{"cache":125012357120,"conda":53927378944,"singularity":4096},"minu0426":{"cache":16384,"conda":0,"singularity":4096},"sieun":{"cache":89132191744,"conda":176597430272,"singularity":4096},"skjinlee":{"cache":665320554496,"conda":770125824,"singularity":4096},"steve97":{"cache":458824478720,"conda":95660834816,"singularity":4096},"wjkim":{"cache":76840845312,"conda":38789660672,"singularity":4096},"woohyeon":{"cache":64219070464,"conda":23729696768,"singularity":4096},"yejoon":{"cache":131090534400,"conda":1054777344,"singularity":353722368},"yongha":{"cache":26852069376,"conda":50728767488,"singularity":4096},"yunseok":{"cache":87494635520,"conda":79736799232,"singularity":11381215232}}}},"users":["csjihwanh","gunchoi","hgkim","hj153lee","hoeun","jake630","jhkim","jihoonkwon","jusang","kdg6245","mintaek","minu0426","sieun","skjinlee","steve97","wjkim","woohyeon","yejoon","yongha","yunseok"]},"history":{"2026-10-04":{"data":{"csjihwanh":1741957017600,"hgkim":285559115776,"hj153lee":1107517849600,"jake630":80933851136,"jhkim":705646960640,"jihoonkwon":4096,"jusang":610659340288,"kdg6245":408324284416,"mintaek":214182502400,"minu0426":1401133146112,"sieun":89663803392,"skjinlee":165154955264,"steve97":702459211776,"yejoon":132533243904,"yongha":453826904064,"yunseok":674776866816},"fs":{"/":{"avail":71994339328,"size":452305682432,"used":357260234752},"/mnt/nvme0":{"avail":826307731456,"size":3779302981632,"used":2760940675072},"/mnt/nvme1":{"avail":1052818063360,"size":3779302981632,"used":2534430343168},"/mnt/nvme2":{"avail":108289466368,"size":3779302981632,"used":3478958940160},"/mnt/nvme3":{"avail":433843757056,"size":3779169796096,"used":3153278230528}},"generated_at":"2026-10-04T14:38:23+00:00","root":{"csjihwanh":29572530176,"gunchoi":17618161664,"hgkim":6271008768,"hj153lee":26157842432,"hoeun":1574072320,"jake630":28388360192,"jhkim":22465179648,"jihoonkwon":32768,"jusang":10062671872,"kdg6245":18401017856,"mintaek":8574775296,"minu0426":21239164928,"sieun":18432126976,"skjinlee":5479411712,"steve97":18356510720,"wjkim":5076795392,"woohyeon":8060702720,"yejoon":24250712064,"yongha":10473271296,"yunseok":37812211712},"shared":{"csjihwanh":57447768064,"gunchoi":104384839680,"hgkim":76041076736,"hj153lee":128176291840,"hoeun":37646495744,"jake630":36330778624,"jhkim":321750851584,"jihoonkwon":8192,"jusang":101143834624,"kdg6245":182519676928,"mintaek":178939666432,"minu0426":20480,"sieun":265729470464,"skjinlee":279156596736,"steve97":554433433600,"wjkim":115573948416,"woohyeon":87948767232,"yejoon":116635570176,"yongha":77580840960,"yunseok":178414600192}},"2026-10-05":{"data":{"csjihwanh":1741957021696,"hgkim":285559115776,"hj153lee":1107517849600,"jake630":80933851136,"jhkim":705646227456,"jihoonkwon":6867132416,"jusang":610659340288,"kdg6245":480074178560,"mintaek":214183038976,"minu0426":1401133146112,"sieun":89663803392,"skjinlee":165154955264,"steve97":704326713344,"yejoon":132563947520,"yongha":453826904064,"yunseok":691024797696},"fs":{"/":{"avail":56265302016,"size":452305682432,"used":372989272064},"/mnt/nvme0":{"avail":747655151616,"size":3779302981632,"used":2839593254912},"/mnt/nvme1":{"avail":1052787556352,"size":3779302981632,"used":2534460850176},"/mnt/nvme2":{"avail":90174144512,"size":3779302981632,"used":3497074262016},"/mnt/nvme3":{"avail":415403257856,"size":3779169796096,"used":3171718729728}},"generated_at":"2026-10-05T14:06:26+00:00","root":{"csjihwanh":30305423360,"gunchoi":17519538176,"hgkim":6271090688,"hj153lee":26258882560,"hoeun":1574121472,"jake630":28388413440,"jhkim":22464212992,"jihoonkwon":73728,"jusang":10062725120,"kdg6245":19796881408,"mintaek":9695645696,"minu0426":22611509248,"sieun":18496040960,"skjinlee":5481078784,"steve97":18859896832,"wjkim":5076852736,"woohyeon":8099577856,"yejoon":32405704704,"yongha":10473328640,"yunseok":40160985088},"shared":{"csjihwanh":57447804928,"gunchoi":104384839680,"hgkim":76041076736,"hj153lee":128176291840,"hoeun":37646495744,"jake630":36330778624,"jhkim":321750851584,"jihoonkwon":8192,"jusang":101143834624,"kdg6245":182519685120,"mintaek":178939674624,"minu0426":20480,"sieun":265729478656,"skjinlee":282808512512,"steve97":554471686144,"wjkim":115573948416,"woohyeon":87948767232,"yejoon":131522416640,"yongha":77580840960,"yunseok":178414620672}},"2026-10-06":{"data":{"csjihwanh":1741957029888,"hgkim":285559115776,"hj153lee":1107517849600,"jake630":80933851136,"jhkim":707188375552,"jihoonkwon":129976840192,"jusang":610659340288,"kdg6245":580114014208,"mintaek":214183600128,"minu0426":1401133146112,"sieun":89663803392,"skjinlee":165225197568,"steve97":705690279936,"yejoon":132583084032,"yongha":453826904064,"yunseok":691024359424},"fs":{"/":{"avail":39710625792,"size":452305682432,"used":389543948288},"/mnt/nvme0":{"avail":524539785216,"size":3779302981632,"used":3062708621312},"/mnt/nvme1":{"avail":1051225710592,"size":3779302981632,"used":2536022695936},"/mnt/nvme2":{"avail":88740773888,"size":3779302981632,"used":3498507632640},"/mnt/nvme3":{"avail":188807057408,"size":3779169796096,"used":3398314930176}},"generated_at":"2026-10-06T14:06:08+00:00","root":{"csjihwanh":30797553664,"gunchoi":17519603712,"hgkim":6532161536,"hj153lee":26978070528,"hoeun":1574170624,"jake630":28388466688,"jhkim":23387955200,"jihoonkwon":749568,"jusang":10062782464,"kdg6245":20953251840,"mintaek":10078351360,"minu0426":22611566592,"sieun":18087849984,"skjinlee":16792158208,"steve97":18872147968,"wjkim":5076910080,"woohyeon":7863058432,"yejoon":32914780160,"yongha":10473385984,"yunseok":41313300480},"shared":{"csjihwanh":57447833600,"gunchoi":104384839680,"hgkim":76041076736,"hj153lee":128176291840,"hoeun":37646495744,"jake630":36330778624,"jhkim":321750851584,"jihoonkwon":8192,"jusang":101143834624,"kdg6245":182527234048,"mintaek":178939691008,"minu0426":20480,"sieun":265729478656,"skjinlee":509390917632,"steve97":554477072384,"wjkim":115573948416,"woohyeon":87948771328,"yejoon":131522637824,"yongha":77580840960,"yunseok":178414620672}},"2026-10-07":{"data":{"csjihwanh":1741957033984,"hgkim":285559115776,"hj153lee":859868352512,"jake630":80933851136,"jhkim":711840743424,"jihoonkwon":218491375616,"jusang":610659340288,"kdg6245":738732429312,"mintaek":214184148992,"minu0426":1401133146112,"sieun":89663803392,"skjinlee":259561787392,"steve97":705771270144,"yejoon":132583084032,"yongha":453826904064,"yunseok":700236292096},"fs":{"/":{"avail":40426622976,"size":452305682432,"used":388827951104},"/mnt/nvme0":{"avail":277407752192,"size":3779302981632,"used":3309840654336},"/mnt/nvme1":{"avail":1046572793856,"size":3779302981632,"used":2540675612672},"/mnt/nvme2":{"avail":232760758272,"size":3779302981632,"used":3354487648256},"/mnt/nvme3":{"avail":152027848704,"size":3779169796096,"used":3435094138880}},"generated_at":"2026-10-07T14:06:14+00:00","root":{"csjihwanh":30800805888,"gunchoi":17519706112,"hgkim":7235461120,"hj153lee":27047989248,"hoeun":1574260736,"jake630":28388560896,"jhkim":24327569408,"jihoonkwon":749568,"jusang":11468832768,"kdg6245":22831222784,"mintaek":10574094336,"minu0426":22611783680,"sieun":21332484096,"skjinlee":17849597952,"steve97":19595882496,"wjkim":6896128000,"woohyeon":8091377664,"yejoon":34169278464,"yongha":11176337408,"yunseok":25657667584},"shared":{"csjihwanh":57447866368,"gunchoi":104384839680,"hgkim":76041076736,"hj153lee":128176291840,"hoeun":37646495744,"jake630":36330778624,"jhkim":321750859776,"jihoonkwon":8192,"jusang":101143834624,"kdg6245":182527234048,"mintaek":178939707392,"minu0426":20480,"sieun":265729478656,"skjinlee":546080817152,"steve97":554477092864,"wjkim":115630510080,"woohyeon":87948771328,"yejoon":131522691072,"yongha":77580840960,"yunseok":178413965312}},"2026-10-08":{"data":{"csjihwanh":1741957038080,"hgkim":285559115776,"hj153lee":859868352512,"jake630":80933851136,"jhkim":724222803968,"jihoonkwon":218491375616,"jusang":610659340288,"kdg6245":775058182144,"mintaek":214184701952,"minu0426":1401133146112,"sieun":95812521984,"skjinlee":320897073152,"steve97":706601648128,"yejoon":132583084032,"yongha":453826904064,"yunseok":700236300288},"fs":{"/":{"avail":28032225280,"size":452305682432,"used":401222348800},"/mnt/nvme0":{"avail":241082441728,"size":3779302981632,"used":3346165964800},"/mnt/nvme1":{"avail":1034190012416,"size":3779302981632,"used":2553058394112},"/mnt/nvme2":{"avail":164446367744,"size":3779302981632,"used":3422802038784},"/mnt/nvme3":{"avail":80644169728,"size":3779169796096,"used":3506477817856}},"generated_at":"2026-10-08T14:06:07+00:00","root":{"csjihwanh":32660787200,"gunchoi":18222653440,"hgkim":7235547136,"hj153lee":29191827456,"hoeun":1574313984,"jake630":28388618240,"jhkim":25280618496,"jihoonkwon":749568,"jusang":11468886016,"kdg6245":23220092928,"mintaek":9460363264,"minu0426":23314059264,"sieun":20840427520,"skjinlee":25190383616,"steve97":18574147584,"wjkim":6896185344,"woohyeon":9134153728,"yejoon":34602274816,"yongha":11176398848,"yunseok":24645185536},"shared":{"csjihwanh":57447903232,"gunchoi":104384839680,"hgkim":76041076736,"hj153lee":128645664768,"hoeun":37646495744,"jake630":36330778624,"jhkim":321750859776,"jihoonkwon":8192,"jusang":101143834624,"kdg6245":182527234048,"mintaek":178939715584,"minu0426":20480,"sieun":265729523712,"skjinlee":617020575744,"steve97":554485317632,"wjkim":115630510080,"woohyeon":87948771328,"yejoon":131522752512,"yongha":77580840960,"yunseok":178413998080}},"2026-10-09":{"data":{"csjihwanh":1741957042176,"hgkim":285559115776,"hj153lee":859868352512,"jake630":80933851136,"jhkim":724675387392,"jihoonkwon":218491375616,"jusang":610659340288,"kdg6245":851522211840,"mintaek":214185259008,"minu0426":1401133146112,"sieun":95812521984,"skjinlee":401895419904,"steve97":706601648128,"yejoon":132583084032,"yongha":453826904064,"yunseok":700236308480},"fs":{"/":{"avail":17511038976,"size":452305682432,"used":411743535104},"/mnt/nvme0":{"avail":164583071744,"size":3779302981632,"used":3422665334784},"/mnt/nvme1":{"avail":1033737039872,"size":3779302981632,"used":2553511366656},"/mnt/nvme2":{"avail":83448012800,"size":3779302981632,"used":3503800393728},"/mnt/nvme3":{"avail":78770524160,"size":3779169796096,"used":3508351463424}},"generated_at":"2026-10-09T14:06:11+00:00","root":{"csjihwanh":33116647424,"gunchoi":18222714880,"hgkim":7235641344,"hj153lee":29381079040,"hoeun":1574363136,"jake630":28388671488,"jhkim":26185351168,"jihoonkwon":745472,"jusang":11468947456,"kdg6245":20873666560,"mintaek":11244765184,"minu0426":23314120704,"sieun":25362993152,"skjinlee":28159578112,"steve97":18177875968,"wjkim":6896242688,"woohyeon":9192587264,"yejoon":35055902720,"yongha":11176456192,"yunseok":26511364096},"shared":{"csjihwanh":57447936000,"gunchoi":104384839680,"hgkim":76041076736,"hj153lee":128645664768,"hoeun":37646495744,"jake630":36330778624,"jhkim":321750859776,"jihoonkwon":8192,"jusang":101143834624,"kdg6245":182528581632,"mintaek":178939731968,"minu0426":20480,"sieun":265729626112,"skjinlee":618694066176,"steve97":554485317632,"wjkim":115630510080,"woohyeon":87948771328,"yejoon":131522789376,"yongha":77580840960,"yunseok":178612617216}},"2026-10-10":{"data":{"csjihwanh":1768700878848,"hgkim":285559115776,"hj153lee":859868352512,"jake630":80933851136,"jhkim":725132779520,"jihoonkwon":256027877376,"jusang":610659340288,"kdg6245":917621305344,"mintaek":214185811968,"minu0426":1401158602752,"sieun":95812521984,"skjinlee":401895419904,"steve97":706601648128,"yejoon":132583084032,"yongha":453826904064,"yunseok":700236316672},"fs":{"/":{"avail":62069547008,"size":452305682432,"used":367185027072},"/mnt/nvme0":{"avail":34240851968,"size":3779302981632,"used":3553007554560},"/mnt/nvme1":{"avail":1033253638144,"size":3779302981632,"used":2553994768384},"/mnt/nvme2":{"avail":83448004608,"size":3779302981632,"used":3503800401920},"/mnt/nvme3":{"avail":34273218560,"size":3779169796096,"used":3552848769024}},"generated_at":"2026-10-10T14:06:12+00:00","root":{"csjihwanh":32311320576,"gunchoi":17112449024,"hgkim":7196188672,"hj153lee":28779458560,"hoeun":1574412288,"jake630":28388724736,"jhkim":27088388096,"jihoonkwon":58216448,"jusang":10798231552,"kdg6245":18952175616,"mintaek":8670396416,"minu0426":22377066496,"sieun":24943943680,"skjinlee":10865266688,"steve97":18013835264,"wjkim":6410375168,"woohyeon":7915372544,"yejoon":17417101312,"yongha":11176513536,"yunseok":26661523456},"shared":{"csjihwanh":57447964672,"gunchoi":104384839680,"hgkim":76041076736,"hj153lee":128645664768,"hoeun":37646495744,"jake630":36330778624,"jhkim":321750859776,"jihoonkwon":8192,"jusang":101143834624,"kdg6245":182536323072,"mintaek":178939740160,"minu0426":20480,"sieun":265729626112,"skjinlee":663183540224,"steve97":554485317632,"wjkim":115630510080,"woohyeon":87948771328,"yejoon":131522813952,"yongha":77580840960,"yunseok":178612645888}},"2026-10-11":{"generated_at":"2026-10-10T19:06:09+00:00","fs":{"/":{"used":365782458368,"avail":63472115712,"size":452305682432},"/mnt/nvme0":{"used":3466638938112,"avail":120609468416,"size":3779302981632},"/mnt/nvme1":{"used":2553995579392,"avail":1033252827136,"size":3779302981632},"/mnt/nvme2":{"used":3259174076416,"avail":328074330112,"size":3779302981632},"/mnt/nvme3":{"used":3556732149760,"avail":30389837824,"size":3779169796096}},"root":{"csjihwanh":32312020992,"gunchoi":17112477696,"hgkim":7196225536,"hj153lee":28792623104,"hoeun":1574440960,"jake630":28388749312,"jhkim":27091951616,"jihoonkwon":58216448,"jusang":10798264320,"kdg6245":18684968960,"mintaek":8671637504,"minu0426":22377099264,"sieun":24945631232,"skjinlee":10877693952,"steve97":18013863936,"wjkim":6410403840,"woohyeon":7929507840,"yejoon":17560424448,"yongha":11176542208,"yunseok":27244871680},"data":{"csjihwanh":1768700882944,"jihoonkwon":169657208832,"jusang":610659340288,"kdg6245":917621362688,"jake630":80933851136,"jhkim":725133479936,"mintaek":214185922560,"minu0426":1401158602752,"yejoon":132583084032,"hgkim":285559115776,"hj153lee":859868352512,"sieun":95812521984,"skjinlee":415018188800,"steve97":706601648128,"yongha":453826904064,"yunseok":442486427648},"shared":{"csjihwanh":57447976960,"gunchoi":104384839680,"hgkim":76041076736,"hj153lee":128645664768,"hoeun":37646495744,"jake630":36330778624,"jhkim":321750859776,"jihoonkwon":8192,"jusang":101143834624,"kdg6245":182536323072,"mintaek":178939740160,"minu0426":20480,"sieun":265729626112,"skjinlee":666090684416,"steve97":554485317632,"wjkim":115630510080,"woohyeon":87948771328,"yejoon":132499034112,"yongha":77580840960,"yunseok":178612649984}}}}</script>
+<script>
+(() => {
+"use strict";
+const app = document.getElementById("app");
+let D = null;
+try { D = JSON.parse(document.getElementById("data").textContent); } catch (e) {}
+if (!D || !D.latest) { app.innerHTML = "<p>No data yet.</p>"; return; }
+const L = D.latest, H = D.history || {};
+const TZ = "Asia/Seoul", GiB = 1024 ** 3;
+
+const esc = s => String(s).replace(/[&<>"']/g, c => ({"&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"}[c]));
+const UNITS = ["B", "K", "M", "G", "T", "P"];
+function fmt(b) {                       // like df -h / du -h: binary units, rounded up
+  if (b == null) return "—";
+  if (b === 0) return "0";
+  let i = 0, v = Math.abs(b);
+  while (v >= 1024 && i < UNITS.length - 1) { v /= 1024; i++; }
+  let r = v >= 10 || i === 0 ? Math.ceil(v) : Math.ceil(v * 10) / 10;
+  if (r >= 1024 && i < UNITS.length - 1) { i++; r = Math.ceil(r / 1024 * 10) / 10; }
+  return (b < 0 ? "−" : "") + (r >= 10 || i === 0 ? r : r.toFixed(1)) + UNITS[i];
+}
+const pctText = p => Math.ceil(p * 100) + "%";   // df's Use% rounds up too
+const sum = o => Object.values(o || {}).reduce((a, b) => a + (b || 0), 0);
+const level = p => p >= 0.95 ? "crit" : p >= 0.85 ? "warn" : "";
+const bar = (p, cls, color) => `<div class="track"><div class="fill ${cls ?? level(p)}" style="width:${Math.min(100, Math.max(0, p * 100)).toFixed(1)}%${color ? ";background:" + color : ""}"></div></div>`;
+const minibar = (text, p, cls, color) => `<div class="minibar"><span>${text}</span>${bar(p, cls, color)}</div>`;
+
+// ---- per-section disk usage: summary line + one bar split by user (scaled like df's Use%)
+const PALETTE = ["#3b82f6", "#10b981", "#f59e0b", "#ef4444", "#8b5cf6", "#06b6d4", "#ec4899", "#84cc16", "#f97316"];
+const GREY = "#8b949e", LIGHT = "#b6bec9";
+const sw = c => `<span class="sw" style="background:${c}"></span>`;
+function userParts(sorted) {               // [[name, bytes]] largest first; users past the palette share one segment
+  const parts = [], colors = {};
+  sorted.forEach(([n, b], i) => {
+    colors[n] = i < PALETTE.length ? PALETTE[i] : LIGHT;
+    if (i < PALETTE.length) parts.push({label: n, bytes: b, color: PALETTE[i]});
+  });
+  const rest = sorted.slice(PALETTE.length);
+  if (rest.length) parts.push({label: `${rest.length} other users`, bytes: rest.reduce((a, [, b]) => a + b, 0), color: LIGHT});
+  return {parts, colors};
+}
+function usage(fs, parts) {
+  const cap = fs.used + fs.avail, pct = fs.used / cap;
+  const segs = parts.filter(p => p.bytes > 0).map(p =>
+    `<span class="seg" style="width:${(p.bytes / cap * 100).toFixed(3)}%;background:${p.color}" data-tip="${esc(p.label + ": " + fmt(p.bytes))}"></span>`).join("");
+  return `<div class="usage"><div class="usage-text"><span><b>${fmt(fs.used)}</b> used of ${fmt(fs.size)} · <b class="pct ${level(pct)}">${pctText(pct)}</b></span>
+    <span><b>${fmt(fs.avail)}</b> free</span></div><div class="stack">${segs}</div></div>`;
+}
+function kst(dt) {
+  const p = Object.fromEntries(new Intl.DateTimeFormat("en-CA", {timeZone: TZ, year: "numeric", month: "2-digit",
+    day: "2-digit", hour: "2-digit", minute: "2-digit", hourCycle: "h23"}).formatToParts(dt).map(x => [x.type, x.value]));
+  return {day: `${p.year}-${p.month}-${p.day}`, text: `${p.year}-${p.month}-${p.day} ${p.hour}:${p.minute} KST`};
+}
+
+// ---- change vs. ~7 days ago, from the daily history
+const now = kst(new Date(L.generated_at));
+const days = Object.keys(H).sort();
+const targetDay = kst(new Date(Date.parse(now.day + "T12:00:00+09:00") - 7 * 86400e3)).day;
+const older = days.filter(d => d < now.day);
+let baseDay = null;
+if (older.length) { const le = older.filter(d => d <= targetDay); baseDay = le.length ? le[le.length - 1] : older[0]; }
+const base = baseDay ? H[baseDay] : null;
+const dHead = !base || baseDay === targetDay ? "7-day change" : `Change since ${baseDay.slice(5).replace("-", "/")}`;
+function change(space, name, cur) {
+  if (!base) return `<span class="zero">—</span>`;
+  const d = cur - ((base[space] || {})[name] || 0);
+  if (Math.abs(d) < 0.5 * GiB) return `<span class="zero">0</span>`;
+  return d > 0 ? `<span class="up">+${fmt(d)}</span>` : `<span class="down">${fmt(d)}</span>`;
+}
+
+// ---- explanations: "?" icons for sections and rows, dotted underlines for column headers (hover / focus / tap)
+const tip = (label, text) => `<span class="tip" tabindex="0" data-tip="${esc(text)}">${label}</span>`;
+const help = text => `<span class="help" tabindex="0" role="button" aria-label="${esc(text)}" data-tip="${esc(text)}">?</span>`;
+const T = {
+  about: `Read-only scan on aidas every hour at :05; this page updates about 15 min later.
+Sizes as in df -h (1G = 1024³ bytes). Network storage (/mnt/nas, /mnt/TrueNAS, …) is not included.`,
+  root: `Files each user owns anywhere on /, split by location. Only / has quotas.`,
+  quota: `Usage counted toward the hard limit; writes fail at the limit. Should equal Total; if not, an admin can recount with quotacheck.`,
+  data: `Everything inside each user's folder, whoever owns the files. The folders sit on three separate disks with no quotas, so one disk can fill up while others have room.`,
+  shared: `Shared caches and software, reached via /mnt/data. No quotas.`,
+  history: `% used per disk, one point per day, last 30 days.`,
+  share: `Size ÷ (used + free); shares add up to the disk's %.`,
+  total: `Bars are relative to the largest user.`,
+  change: `Compared with 7 days ago (or the oldest day available). Under 0.5G shows as 0.`,
+  na: `Used space that isn't in any file: filesystem metadata, or deleted files still held open by running programs.`,
+  system: `Owned by root and system accounts (OS, software, logs).`,
+  dataOther: `Outside the user folders (e.g. lost+found).`,
+  docker: `Can't be split by user: Docker doesn't record who built an image.`,
+  condaBase: `The shared miniconda3 install itself (everything except userenvs).`,
+  rootOwned: `root's .cache, conda envs and Singularity files.`,
+  sharedOther: `Other folders on this disk.`,
+};
+const changeTh = `<th>${tip(dHead, T.change)}</th>`;
+
+// ---- header
+const ageMin = (Date.now() - Date.parse(L.generated_at)) / 60000;
+let html = `<h1>AIDAS-A100 storage <span id="pano-word" class="pano-word" role="button" tabindex="0" aria-pressed="false">panopticon</span></h1>
+<p class="sub">Updated ${now.text} · scan took ${Math.max(1, Math.round(L.scan_seconds / 60))} min · refreshed hourly${help(T.about)}</p>`;
+if (ageMin > 150) html += `<div class="banner">The last scan is ${Math.round(ageMin / 60)} hours old; the hourly update may be failing.</div>`;
+if (!L.complete) html += `<div class="banner">Partial scan: some folders could not be read, so numbers are lower bounds.</div>`;
+
+// ---- disk cards (each links to its detailed section)
+const R = L.root_fs;
+const anchorId = p => "disk-" + (p === "/" ? "root" : p.split("/").filter(Boolean).pop().replace(/[^A-Za-z0-9_-]/g, ""));
+const disks = [["/", "System + home folders", R.fs, true]];
+for (const [p, d] of Object.entries(L.data_disks)) disks.push([p, "User data folders", d.fs, d.mounted]);
+for (const [p, d] of Object.entries(L.shared_disk)) disks.push([p, "Shared caches + conda", d.fs, d.mounted]);
+const LINK_ICON = `<svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></svg>`;
+html += `<div class="cards">` + disks.map(([p, role, fs, mounted]) => {
+  let body = `<div class="pct crit">not mounted</div>`;
+  if (mounted) {
+    const pct = fs.used / (fs.used + fs.avail);   // same as df's Use%
+    body = `<div class="pct ${level(pct)}">${pctText(pct)}</div>${bar(pct)}
+    <div class="detail">${fmt(fs.used)} of ${fmt(fs.size)} · <b>${fmt(fs.avail)} free</b></div>`;
+  }
+  return `<a class="card" href="#${anchorId(p)}" aria-label="${esc(p)}: show details"><b>${esc(p)}</b>
+    <div class="role">${role}</div>${body}<span class="more">${LINK_ICON}<span aria-hidden="true">↓</span></span></a>`;
+}).join("") + `</div>`;
+
+// ---- /
+const rootRows = Object.entries(R.users).map(([n, u]) =>
+  ({n, u, t: (u.home || 0) + (u.tmp || 0) + (u.var_tmp || 0) + (u.other || 0)}))
+  .filter(r => r.t > 0).sort((a, b) => b.t - a.t);
+const S = R.system || {};
+const rootU = userParts(rootRows.map(r => [r.n, r.t]));
+html += `<section class="anchor" id="disk-root"><h2>/ (system disk)${help(T.root)}</h2>
+${usage(R.fs, [...rootU.parts, {label: "System (root & services) + not attributable", bytes: sum(S) + R.unaccounted, color: GREY}])}
+<div class="scroll"><table><tr><th>User</th><th>/home</th><th>/tmp</th><th>/var/tmp</th><th>Other</th><th>Total</th>
+<th>${tip("Quota", T.quota)}</th>${changeTh}</tr>`;
+for (const {n, u, t} of rootRows) {
+  let q = "—";
+  if (u.quota_hard > 0) q = minibar(`${fmt(u.quota_used)} / ${fmt(u.quota_hard)}`, u.quota_used / u.quota_hard);
+  else if (R.quota_available) q = `<span class="zero">no limit</span>`;
+  html += `<tr><td>${sw(rootU.colors[n])}${esc(n)}</td><td>${fmt(u.home || 0)}</td><td>${fmt(u.tmp || 0)}</td><td>${fmt(u.var_tmp || 0)}</td>
+    <td>${fmt(u.other || 0)}</td><td><b>${fmt(t)}</b></td><td>${q}</td><td>${change("root", n, t)}</td></tr>`;
+}
+html += `<tr class="muted first-common"><td>${sw(GREY)}System (root &amp; services)${help(T.system)}</td><td>${fmt(S.home || 0)}</td><td>${fmt(S.tmp || 0)}</td>
+  <td>${fmt(S.var_tmp || 0)}</td><td>${fmt(S.other || 0)}</td><td>${fmt(sum(S))}</td><td></td><td></td></tr>
+  <tr class="muted"><td>${sw(GREY)}Not attributable${help(T.na)}</td><td></td><td></td><td></td><td></td><td>${fmt(R.unaccounted)}</td><td></td><td></td></tr>
+</table></div></section>`;
+
+// ---- data folders
+html += `<h2>Data folders (<code>/mnt/data/&lt;user&gt;</code>)${help(T.data)}</h2>`;
+const withFolder = new Set();
+for (const [p, d] of Object.entries(L.data_disks)) {
+  if (!d.mounted) { html += `<div class="disk anchor" id="${anchorId(p)}"><h3>${esc(p)}: not mounted</h3></div>`; continue; }
+  const rows = Object.entries(d.users).sort((a, b) => b[1] - a[1]);
+  rows.forEach(([n]) => withFolder.add(n));
+  const du = userParts(rows), cap = d.fs.used + d.fs.avail;
+  html += `<div class="disk anchor" id="${anchorId(p)}"><h3>${esc(p)}</h3>
+  ${usage(d.fs, [...du.parts, {label: "Other + not attributable", bytes: d.other + d.unaccounted, color: GREY}])}
+  <div class="scroll"><table><tr><th>User</th><th>Size</th><th>${tip("Share of disk", T.share)}</th>${changeTh}</tr>`;
+  for (const [n, b] of rows)
+    html += `<tr><td>${sw(du.colors[n])}${esc(n)}</td><td><b>${fmt(b)}</b></td><td>${minibar(Math.round(b / cap * 100) + "%", b / cap, "", du.colors[n])}</td><td>${change("data", n, b)}</td></tr>`;
+  html += `<tr class="muted first-common"><td>${sw(GREY)}Other (not a user folder)${help(T.dataOther)}</td><td>${fmt(d.other)}</td><td></td><td></td></tr>
+  <tr class="muted"><td>${sw(GREY)}Not attributable${help(T.na)}</td><td>${fmt(d.unaccounted)}</td><td></td><td></td></tr></table></div></div>`;
+}
+const noFolder = (L.users || []).filter(n => !withFolder.has(n));
+if (noFolder.length) html += `<p class="note">No data folder: ${noFolder.map(esc).join(", ")}</p>`;
+
+// ---- shared disk
+for (const [p, d] of Object.entries(L.shared_disk)) {
+  html += `<section class="anchor" id="${anchorId(p)}"><h2>Shared disk (<code>${esc(p)}</code>)${help(T.shared)}</h2>`;
+  if (!d.mounted) { html += `<p class="note">Not mounted.</p></section>`; continue; }
+  const rows = Object.entries(d.users).map(([n, u]) => ({n, u, t: sum(u)})).filter(r => r.t > 0).sort((a, b) => b.t - a.t);
+  const max = Math.max(1, ...rows.map(r => r.t));
+  const su = userParts(rows.map(r => [r.n, r.t]));
+  html += usage(d.fs, [...su.parts, {label: "Common (Docker, conda base, root's files, other) + not attributable",
+                                     bytes: sum(d.common) + d.unaccounted, color: GREY}]);
+  html += `<div class="scroll"><table><tr><th>User</th>
+    <th>${tip(".cache", "/mnt/data/.cache/<user>")}</th>
+    <th>${tip("conda envs", "/mnt/data/miniconda3/userenvs/<user> (envs + package cache)")}</th>
+    <th>${tip("Singularity", "/mnt/data/.singularity_cachedir/<user> + images the user owns in /mnt/data/singularity-images")}</th>
+    <th>${tip("Total", T.total)}</th>${changeTh}</tr>`;
+  for (const {n, u, t} of rows)
+    html += `<tr><td>${sw(su.colors[n])}${esc(n)}</td><td>${fmt(u.cache)}</td><td>${fmt(u.conda)}</td><td>${fmt(u.singularity)}</td>
+      <td>${minibar("<b>" + fmt(t) + "</b>", t / max, "", su.colors[n])}</td><td>${change("shared", n, t)}</td></tr>`;
+  const C = d.common, labels = [["docker", "Docker (images, build cache)", T.docker], ["conda_base", "conda base install", T.condaBase],
+    ["root", "root's caches, envs, images", T.rootOwned], ["other", "Other", T.sharedOther]];
+  labels.forEach(([k, label, text], i) => {
+    html += `<tr class="muted${i === 0 ? " first-common" : ""}"><td>${sw(GREY)}${label}${help(text)}</td><td></td><td></td><td></td><td>${fmt(C[k] || 0)}</td><td></td></tr>`;
+  });
+  html += `<tr class="muted"><td>${sw(GREY)}Not attributable${help(T.na)}</td><td></td><td></td><td></td><td>${fmt(d.unaccounted)}</td><td></td></tr></table></div></section>`;
+}
+
+// ---- history chart: % used per disk, one point per day, last 30 days.
+// Grouped by disk type and colorblind-safe: hue = type (grey / blues / orange), shade + marker tell the data disks apart.
+html += `<h2>Disk usage, last 30 days${help(T.history)}</h2>`;
+let chart = null;
+const dataDiskNames = Object.keys(L.data_disks);
+const styleOf = n => {
+  if (n === "/") return {cls: "g-root", label: "system disk", marker: "ring"};
+  const i = dataDiskNames.indexOf(n);
+  if (i >= 0) return {cls: `g-data d${i % 3}`, group: "data", label: "data disk", marker: ["circle", "square", "triangle"][i % 3]};
+  return {cls: "g-shared", label: "shared disk", marker: "diamond"};
+};
+const marker = (m, cx, cy) => {
+  const f = v => v.toFixed(1);
+  if (m === "square") return `<rect class="mk" x="${f(cx - 3)}" y="${f(cy - 3)}" width="6" height="6"/>`;
+  if (m === "triangle") return `<path class="mk" d="M${f(cx)} ${f(cy - 4)}L${f(cx + 3.8)} ${f(cy + 2.8)}L${f(cx - 3.8)} ${f(cy + 2.8)}Z"/>`;
+  if (m === "diamond") return `<path class="mk" d="M${f(cx)} ${f(cy - 4.2)}L${f(cx + 4.2)} ${f(cy)}L${f(cx)} ${f(cy + 4.2)}L${f(cx - 4.2)} ${f(cy)}Z"/>`;
+  if (m === "ring") return `<circle class="mk ring" cx="${f(cx)}" cy="${f(cy)}" r="3.4"/>`;
+  return `<circle class="mk" cx="${f(cx)}" cy="${f(cy)}" r="3.2"/>`;
+};
+const shortName = n => n === "/" ? "/" : n.split("/").pop();
+if (!days.length) {
+  html += `<p class="note">History starts with the first complete scan (one point per day).</p>`;
+} else {
+  const W = 800, Ht = 220, padL = 36, padR = 10, padT = 10, padB = 24;
+  const endMs = Date.parse(now.day + "T12:00:00+09:00"), startMs = endMs - 29 * 86400e3;
+  const x = day => padL + (Date.parse(day + "T12:00:00+09:00") - startMs) / (endMs - startMs) * (W - padL - padR);
+  const names = disks.map(d => d[0]);
+  const byName = Object.fromEntries(names.map(n => [n, days.map(day => {
+    const f = (H[day].fs || {})[n];
+    return f ? [day, f.used / (f.used + f.avail)] : null;
+  }).filter(Boolean)]));
+  const all = Object.values(byName).flat().map(p => p[1]);
+  const yMin = Math.max(0, Math.floor((Math.min(...all) * 100 - 5) / 10) * 10) / 100;
+  const y = v => padT + (1 - (v - yMin) / (1 - yMin)) * (Ht - padT - padB);
+  let svg = `<svg viewBox="0 0 ${W} ${Ht}" role="img" aria-label="Disk usage history">`;
+  for (let g = Math.round(yMin * 100); g <= 100; g += 10)
+    svg += `<line class="grid" x1="${padL}" x2="${W - padR}" y1="${y(g / 100)}" y2="${y(g / 100)}"/><text x="${padL - 6}" y="${y(g / 100) + 4}" text-anchor="end">${g}%</text>`;
+  for (let i = 0; i < 28; i += 7) {
+    const day = kst(new Date(startMs + i * 86400e3)).day;
+    svg += `<text x="${x(day)}" y="${Ht - 6}" text-anchor="middle">${day.slice(5).replace("-", "/")}</text>`;
+  }
+  svg += `<text x="${x(now.day)}" y="${Ht - 6}" text-anchor="end">${now.day.slice(5).replace("-", "/")}</text>`;
+  for (const n of names) {
+    const pts = byName[n], s = styleOf(n);
+    if (!pts.length) continue;
+    const poly = pts.map(([d, v]) => `${x(d).toFixed(1)},${y(v).toFixed(1)}`).join(" ");
+    svg += `<g class="series ${s.cls}" data-series="${esc(n)}">
+      <polyline class="ln" points="${poly}"/>
+      ${pts.map(([d, v]) => marker(s.marker, x(d), y(v))).join("")}
+      <polyline class="hit" points="${poly}"/></g>`;
+  }
+  svg += `</svg>`;
+  const item = n => {
+    const s = styleOf(n);
+    return `<span class="lg ${s.cls}" data-series="${esc(n)}"><svg width="28" height="10" viewBox="0 0 28 10" aria-hidden="true">
+      <line class="ln" x1="1" y1="5" x2="27" y2="5"/>${marker(s.marker, 14, 5)}</svg>${esc(shortName(n))}</span>`;
+  };
+  const groups = [["System", names.filter(n => n === "/")],
+                  ["Data disks", names.filter(n => styleOf(n).group === "data")],
+                  ["Shared", names.filter(n => n !== "/" && styleOf(n).group !== "data")]];
+  html += `<div class="chart">${svg}<div class="legend">${groups.filter(([, ns]) => ns.length)
+    .map(([label, ns]) => `<span class="lg-group"><b>${label}</b>${ns.map(item).join("")}</span>`).join("")}</div></div>`;
+  chart = {x, byName};
+}
+
+app.innerHTML = html;
+
+// ---- tooltips for [data-tip]: one floating element, so table scrolling can't clip it
+const tipEl = document.createElement("div");
+tipEl.id = "tooltip";
+tipEl.setAttribute("role", "tooltip");
+document.body.appendChild(tipEl);
+function showTip(el) {
+  tipEl.textContent = el.dataset.tip;
+  tipEl.classList.add("show");
+  const r = el.getBoundingClientRect(), w = tipEl.offsetWidth, h = tipEl.offsetHeight;
+  tipEl.style.left = Math.min(Math.max(8, r.left + r.width / 2 - w / 2), window.innerWidth - w - 8) + "px";
+  // below the element, or above it when there is no room below
+  tipEl.style.top = (r.bottom + 6 + h > window.innerHeight - 8 ? Math.max(8, r.top - 6 - h) : r.bottom + 6) + "px";
+}
+const hideTip = () => tipEl.classList.remove("show");
+document.querySelectorAll("[data-tip]").forEach(el => {
+  el.addEventListener("mouseenter", () => showTip(el));
+  el.addEventListener("mouseleave", hideTip);
+  el.addEventListener("focus", () => showTip(el));
+  el.addEventListener("blur", hideTip);
+  el.addEventListener("click", e => { e.stopPropagation(); showTip(el); });   // touch screens
+});
+document.addEventListener("click", hideTip);
+window.addEventListener("scroll", hideTip, {passive: true});
+
+// ---- history chart: hovering a line (or its legend entry) highlights it and labels it
+function showTipAt(text, cx, cy) {
+  tipEl.textContent = text;
+  tipEl.classList.add("show");
+  const w = tipEl.offsetWidth, h = tipEl.offsetHeight;
+  tipEl.style.left = Math.max(8, Math.min(cx + 12, window.innerWidth - w - 8)) + "px";
+  tipEl.style.top = (cy + 16 + h > window.innerHeight - 8 ? cy - 10 - h : cy + 16) + "px";
+}
+const chartSvg = document.querySelector(".chart > svg");
+if (chart && chartSvg) {
+  const highlight = name => {
+    chartSvg.classList.toggle("hovering", !!name);
+    chartSvg.querySelectorAll(".series").forEach(s => s.classList.toggle("on", s.dataset.series === name));
+  };
+  const onChart = e => {
+    const g = e.target.closest(".series");
+    highlight(g ? g.dataset.series : null);
+    if (!g) { hideTip(); return; }
+    const name = g.dataset.series, pts = chart.byName[name];
+    const p = new DOMPoint(e.clientX, e.clientY).matrixTransform(chartSvg.getScreenCTM().inverse());
+    const [day, v] = pts.reduce((a, b) => Math.abs(chart.x(b[0]) - p.x) < Math.abs(chart.x(a[0]) - p.x) ? b : a);
+    showTipAt(`${name} (${styleOf(name).label})\n${day.slice(5).replace("-", "/")}: ${(v * 100).toFixed(1)}% used`, e.clientX, e.clientY);
+  };
+  chartSvg.addEventListener("mousemove", onChart);
+  chartSvg.addEventListener("click", e => { e.stopPropagation(); onChart(e); });   // touch screens
+  chartSvg.addEventListener("mouseleave", () => { highlight(null); hideTip(); });
+  document.querySelectorAll(".legend .lg").forEach(item => {
+    item.addEventListener("mouseenter", () => highlight(item.dataset.series));
+    item.addEventListener("mouseleave", () => highlight(null));
+  });
+}
+
+// ---- easter egg: "panopticon" in the title toggles a faint panopticon floor plan behind the page
+function panopticonSVG(still) {
+  const RO = 470, RC = 350, RG = 325, RT = 96, RTI = 70, N = 48, f = v => v.toFixed(1);
+  const pt = (r, t) => `${f(r * Math.cos(t))} ${f(r * Math.sin(t))}`;   // polar -> "x y"
+  let s = `<svg viewBox="-500 -500 1000 1000" xmlns="http://www.w3.org/2000/svg" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+    <defs><radialGradient id="pano-beam" cx="0" cy="0" r="${RO}" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="currentColor" stop-opacity=".9"/><stop offset="1" stop-color="currentColor" stop-opacity="0"/></radialGradient>
+      <clipPath id="pano-eye-clip"><path d="M-46 0 Q0 -36 46 0 Q0 36 -46 0 Z"/></clipPath></defs>`;
+  const a = 7 * Math.PI / 180;   // the tower's searchlight sweeping the cells
+  s += `<g><path d="M0 0 L${pt(RO, -a)} A${RO} ${RO} 0 0 1 ${pt(RO, a)} Z" fill="url(#pano-beam)" stroke="none"/>` +
+       (still ? "" : `<animateTransform attributeName="transform" type="rotate" from="0 0 0" to="360 0 0" dur="48s" repeatCount="indefinite"/>`) + `</g>`;
+  // outer wall, ring of cells (with grated fronts), gallery
+  s += `<circle r="${RO}" stroke-width="5"/><circle r="${RO - 12}"/><circle r="${RC}" stroke-width="3"/>
+    <circle r="${RC + 9}" stroke-dasharray="2 7"/><circle r="${RG}" stroke-dasharray="6 10"/>`;
+  for (let i = 0; i < N; i++) { const t = i / N * 2 * Math.PI; s += `<path d="M${pt(RC, t)} L${pt(RO - 12, t)}"/>`; }
+  for (let i = 0; i < 4; i++) {   // bridges from the tower to the gallery (parallel rails)
+    const t = Math.PI / 4 + i * Math.PI / 2, o = 0.05, og = o * RT / RG;
+    s += `<path d="M${pt(RT, t - o)} L${pt(RG, t - og)} M${pt(RT, t + o)} L${pt(RG, t + og)}"/>`;
+  }
+  // the inspection tower with its window slits, and the eye
+  s += `<circle r="${RT}" stroke-width="4"/><circle r="${RTI}"/>`;
+  for (let i = 0; i < 16; i++) { const t = i / 16 * 2 * Math.PI; s += `<path d="M${pt(RTI + 6, t)} L${pt(RT - 6, t)}" stroke-width="3"/>`; }
+  s += `<g>${still ? "" : `<animateTransform attributeName="transform" type="scale" values="1 1;1 1;1 .08;1 1" keyTimes="0;.93;.965;1" dur="6s" repeatCount="indefinite"/>`}
+    <path d="M-46 0 Q0 -36 46 0 Q0 36 -46 0 Z" stroke-width="3"/>
+    <g clip-path="url(#pano-eye-clip)"><g id="pano-iris"><circle r="15" stroke-width="3"/><circle r="6" fill="currentColor" stroke="none"/></g></g></g>`;
+  return s + `</svg>`;
+}
+const word = document.getElementById("pano-word"), PANO_KEY = "aidas-panopticon", f1 = v => v.toFixed(1);
+function setPanopticon(on) {
+  if (on && !document.getElementById("pano-bg")) {
+    const bg = document.createElement("div");
+    bg.id = "pano-bg";
+    bg.innerHTML = panopticonSVG(matchMedia("(prefers-reduced-motion: reduce)").matches);
+    document.body.prepend(bg);
+    void bg.offsetWidth;                         // start from opacity 0 so it fades in
+  }
+  document.body.classList.toggle("panopticon", on);
+  word.setAttribute("aria-pressed", String(on));
+  try { localStorage.setItem(PANO_KEY, on ? "1" : "0"); } catch (e) {}
+}
+word.addEventListener("click", () => setPanopticon(!document.body.classList.contains("panopticon")));
+word.addEventListener("keydown", e => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); word.click(); } });
+document.addEventListener("mousemove", e => {   // the tower's eye follows the cursor
+  const iris = document.body.classList.contains("panopticon") && document.getElementById("pano-iris");
+  if (!iris) return;
+  const dx = e.clientX - innerWidth / 2, dy = e.clientY - innerHeight / 2, d = Math.hypot(dx, dy) || 1, k = Math.min(1, d / 320);
+  iris.setAttribute("transform", `translate(${f1(dx / d * 24 * k)} ${f1(dy / d * 8 * k)})`);
+});
+try { if (localStorage.getItem(PANO_KEY) === "1") setPanopticon(true); } catch (e) {}
+})();
+</script>
+</body>
+</html>
