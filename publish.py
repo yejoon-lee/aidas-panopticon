@@ -2,11 +2,11 @@
 """Publish the AIDAS storage dashboard to GitHub Pages.
 
 Runs on aidas as an ordinary user, from crontab every 15 minutes. Reads the hourly scan
-(/mnt/TrueNAS/yejoon/aidas-storage/latest.json, written by the root job in aidas/), checks its
-shape, keeps one snapshot per day for 30 days, renders template.html into a static page, and
+(/mnt/TrueNAS/yejoon/aidas-storage/latest.json, written by the root job in aidas/) and the
+/mnt/TrueNAS scan next to it (truenas.json, from aidas/truenas-scan), checks their shape, keeps one snapshot per day for 30 days, renders template.html into a static page, and
 force-pushes it as a single commit to the gh-pages branch of yejoon-lee/aidas-panopticon with a
 deploy key that can push to this repository only (~/.ssh/aidas_panopticon_deploy).
-Does nothing when there is no new scan.
+Does nothing when neither scan is new.
 
   publish.py                                          the cron job
   publish.py --force                                  publish now, even if the scan is not new
@@ -37,6 +37,8 @@ LOCK = STATE / "publish.lock"
 TEMPLATE = HERE / "template.html"
 
 SCAN_FILE = "/mnt/TrueNAS/yejoon/aidas-storage/latest.json"
+NET_SCAN_FILE = "/mnt/TrueNAS/yejoon/aidas-storage/truenas.json"
+NET_FRESH_HOURS = 26   # an older TrueNAS scan is still shown (marked as old) but not kept in the history
 LIVE_DATA = "https://yejoon.me/aidas-panopticon/data.json"
 MAX_BYTES = 2_000_000
 REPO = "yejoon-lee/aidas-panopticon"
@@ -50,6 +52,7 @@ KST = datetime.timezone(datetime.timedelta(hours=9))
 KEEP_DAYS = 30
 NAME_RE = re.compile(r"[a-z_][a-z0-9_.-]{0,31}")
 DISK_RE = re.compile(r"/[A-Za-z0-9_./-]{0,63}")
+FOLDER_RE = re.compile(r"[^/\x00-\x1f\x7f]{1,128}")   # NAS folder names; the page escapes them
 
 
 def log(msg):
@@ -113,6 +116,40 @@ def validate(doc):
             _check(not d["mounted"] or ok(d), f"{group} {disk}")
 
 
+def validate_net(net):
+    """Shape check for truenas.json (also on the shared drive)."""
+    fs_keys = {"size", "used", "avail"}
+    _check(isinstance(net, dict) and net.get("schema") == 1 and DISK_RE.fullmatch(net.get("path", "")), "schema")
+    datetime.datetime.fromisoformat(net["generated_at"])
+    _check(type(net["scan_seconds"]) in (int, float) and net["scan_seconds"] >= 0, "scan_seconds")
+    _check(type(net["complete"]) is bool and net["mounted"] is True and _num(net["errors"]), "flags")
+    _check(_sizes(net["fs"], fs_keys) and _num(net["other"]) and _num(net["unaccounted"])
+           and _names_ok(net["users"], _num), "sizes")
+    sh = net["shared"]
+    _check(isinstance(sh, dict) and len(sh) <= 200, "shared")
+    for name, f in sh.items():
+        _check(FOLDER_RE.fullmatch(name) and isinstance(f, dict)
+               and set(f) == {"size", "children", "rest", "rest_count"}
+               and _num(f["size"]) and _num(f["rest"]) and _num(f["rest_count"])
+               and isinstance(f["children"], dict) and len(f["children"]) <= 50
+               and all(FOLDER_RE.fullmatch(c) and _num(b) for c, b in f["children"].items()), f"shared {name}")
+
+
+def read_net():
+    """(TrueNAS scan, None) or (None, why). Without it the rest of the page still publishes."""
+    try:
+        net = read_scan(NET_SCAN_FILE)
+        validate_net(net)
+        return net, None
+    except Exception as e:  # noqa: BLE001 - reported with the next publish
+        return None, f"{type(e).__name__}: {str(e)[:200]}"
+
+
+def _net_fresh(doc, net):
+    t = lambda s: datetime.datetime.fromisoformat(s)
+    return abs((t(doc["generated_at"]) - t(net["generated_at"])).total_seconds()) < NET_FRESH_HOURS * 3600
+
+
 def summarize(doc):
     """What the history keeps per day: filesystem usage and per-user totals per space."""
     snap = {"generated_at": doc["generated_at"], "fs": {}, "root": {}, "data": {}, "shared": {}}
@@ -130,6 +167,12 @@ def summarize(doc):
             snap["fs"][disk] = {k: d["fs"][k] for k in ("used", "avail", "size")}
             for name, u in d["users"].items():
                 snap["shared"][name] = sum(u.values())
+    for disk, d in doc.get("network_disks", {}).items():
+        if _net_fresh(doc, d):
+            snap["fs"][disk] = {k: d["fs"][k] for k in ("used", "avail", "size")}
+            net = snap.setdefault("net", {})   # only on days with a TrueNAS scan
+            for name, v in d["users"].items():
+                net[name] = net.get(name, 0) + v
     return snap
 
 
@@ -140,7 +183,8 @@ def _snapshot_ok(day, s):
         return bool(isinstance(s["fs"], dict)
                     and all(DISK_RE.fullmatch(k) and _sizes(v, {"used", "avail", "size"})
                             for k, v in s["fs"].items())
-                    and all(_names_ok(s[k], _num) for k in ("root", "data", "shared")))
+                    and all(_names_ok(s[k], _num) for k in ("root", "data", "shared"))
+                    and _names_ok(s.get("net", {}), _num))
     except (KeyError, TypeError, ValueError):
         return False
 
@@ -230,6 +274,7 @@ def note_error(msg):
 def main():
     ap = argparse.ArgumentParser(description="Publish the AIDAS storage dashboard.")
     ap.add_argument("--input", default=SCAN_FILE, help="scan JSON to publish (default: %(default)s)")
+    ap.add_argument("--net-input", help="TrueNAS scan JSON to use with --input (preview)")
     ap.add_argument("--out", help="also write the site to this directory")
     ap.add_argument("--no-push", action="store_true", help="do not push to GitHub")
     ap.add_argument("--force", action="store_true", help="publish even if the scan is not new")
@@ -252,8 +297,17 @@ def main():
         note_error(f"{type(e).__name__}: {e}")
         return 1
 
+    net, net_err = None, None
+    if args.net_input:
+        net = read_scan(args.net_input)
+        validate_net(net)
+    elif args.input == SCAN_FILE:
+        net, net_err = read_net()
+    if net:
+        doc["network_disks"] = {net["path"]: net}
+    stamp = doc["generated_at"] + (" " + net["generated_at"] if net else "")
     last = PUBLISHED.read_text().strip() if PUBLISHED.exists() else ""
-    if doc["generated_at"] == last and not args.force:
+    if stamp == last and not args.force:
         return 0
     hist = update_history(doc) if doc.get("complete") else load_history()
     payload = {"latest": doc, "history": hist}
@@ -271,11 +325,12 @@ def main():
     except Exception as e:  # noqa: BLE001 - logged, retried next run
         note_error(f"push failed: {str(e)[:500]}")
         return 1
-    PUBLISHED.write_text(doc["generated_at"] + "\n")
+    PUBLISHED.write_text(stamp + "\n")
     if LAST_ERROR.exists():
         LAST_ERROR.unlink()
     via = f" via {used}" if used != remotes[0] else ""
     log(f"published scan {doc['generated_at']} (complete={doc.get('complete')}, "
+        f"TrueNAS {net['generated_at'] if net else 'not used: ' + str(net_err)}, "
         f"{len(hist)} days of history){via}")
     return 0
 

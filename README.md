@@ -8,7 +8,9 @@ Hourly storage-usage dashboard for the AIDAS-A100 lab server: **https://yejoon.m
 1. **Scan** (root, hourly at :05). `/etc/cron.d/aidas-storage` runs `/usr/local/sbin/aidas-storage-scan`
    (both from `aidas/`). It only reads (`du -x`, `find -xdev`, `repquota`, `statvfs`) and writes totals,
    no file paths, to `/mnt/TrueNAS/yejoon/aidas-storage/latest.json`. Log: `/var/log/aidas-storage-scan.log`.
-2. **Publish** (yejoon's crontab on aidas, every 15 min). `publish.py` reads that file. When it is a new scan
+   `/mnt/TrueNAS` has its own scan (`aidas/truenas-scan`, yejoon's crontab, every 6 hours, no root; see below)
+   writing `truenas.json` next to it, so a slow NAS cannot hold up the other disks.
+2. **Publish** (yejoon's crontab on aidas, every 15 min). `publish.py` reads both files. When it is a new scan
    with the expected shape, it keeps one snapshot per KST day for 30 days (`state/history.json`), renders
    `template.html`, and force-pushes one commit (`index.html`, `data.json`) to `gh-pages` with a deploy key
    that can push to this repository only. If GitHub's port 22 is blocked it uses port 443. Errors go to
@@ -41,4 +43,18 @@ crontab -e                                      # add the line below
 - `/mnt/nvme0-2`: each user's data folder (`/mnt/data/<user>`), the whole folder whoever owns the files.
 - `/mnt/nvme3`: per user `.cache`, conda `userenvs`, Singularity cache and owned images; Docker, the conda
   base install and root's files are listed as common.
-- Network mounts (/mnt/nas, /mnt/nasdata, /mnt/TrueNAS, /mnt/ece) are not counted.
+- `/mnt/TrueNAS` (NFS from the lab TrueNAS on a direct 10G link): each top-level folder named after a user is
+  theirs, whoever owns the files (the NAS maps every client user to one account anyway); other top-level
+  folders (`datasets`, ...) are listed as shared, each with its 12 largest sub-folders.
+- Other network mounts (/mnt/nas, /mnt/nasdata, /mnt/ece) are not counted.
+
+## TrueNAS scan (as yejoon on aidas, no sudo)
+`aidas/truenas-scan` runs one `du -sxk` per sub-folder of each top-level folder, 8 at a time. The share has
+millions of small files (content-addressed object stores), so a pass takes about an hour even on the 10G link:
+the limit is NFS metadata round trips, not bandwidth. Hence every 6 hours. Add to `crontab -e`:
+```
+50 */6 * * * flock -n $HOME/aidas-panopticon/state/truenas-scan.lock timeout -k 2m 3h nice -n 19 /usr/bin/python3 $HOME/aidas-panopticon/aidas/truenas-scan >> $HOME/aidas-panopticon/state/truenas-scan.log 2>&1
+```
+`truenas-scan --out -` prints a scan without writing it. Without a usable `truenas.json` the page still publishes,
+without the TrueNAS section; a scan older than 13 hours is marked on the page, and one more than 26 hours older
+than the main scan is left out of the history.

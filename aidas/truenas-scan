@@ -1,0 +1,149 @@
+#!/usr/bin/python3 -I
+"""Read-only usage scan of /mnt/TrueNAS for the AIDAS storage dashboard.
+
+/mnt/TrueNAS is an NFS share from the lab TrueNAS (10.210.100.200), on a direct 10 GbE link.
+The NAS maps every client user to one account, so this needs no root: it runs from
+yejoon's crontab on aidas (see README), separately from the hourly root scan, so a slow or
+unresponsive NAS cannot hold up the other disks.
+
+Top-level folders named after a login account belong to that user (the whole folder); other
+top-level folders (datasets, ...) are listed by name as shared folders, with their largest
+sub-folders. Writes totals only, no file paths beyond those folder names, to
+/mnt/TrueNAS/yejoon/aidas-storage/truenas.json; publish.py adds it to the page.
+"""
+import argparse
+import concurrent.futures as cf
+import datetime
+import json
+import os
+import pwd
+import subprocess
+import sys
+import time
+
+MOUNT = "/mnt/TrueNAS"
+DEFAULT_OUT = "/mnt/TrueNAS/yejoon/aidas-storage/truenas.json"
+DU = "/usr/bin/du"
+ENV = {"PATH": "/usr/sbin:/usr/bin:/sbin:/bin", "LC_ALL": "C"}
+WORKERS = 8
+TOP_CHILDREN = 12   # sub-folders listed per shared folder; the rest are summed
+
+
+def human_users():
+    return {p.pw_name for p in pwd.getpwall() if 1000 <= p.pw_uid < 60000}
+
+
+def fs_usage(path):
+    st = os.statvfs(path)
+    return {"size": st.f_blocks * st.f_frsize,
+            "used": (st.f_blocks - st.f_bfree) * st.f_frsize,
+            "avail": st.f_bavail * st.f_frsize}
+
+
+def du(path):
+    """(allocated bytes, error count); one filesystem, never follows symlinks."""
+    p = subprocess.run([DU, "-sxk", "--", path], stdout=subprocess.PIPE,
+                       stderr=subprocess.PIPE, env=ENV)
+    kb = 0
+    for line in p.stdout.splitlines():
+        kb = int(line.split(b"\t", 1)[0])
+    return kb * 1024, len(p.stderr.splitlines())
+
+
+def size_of(entry):
+    """du for folders; files and links are sized from lstat (no process per file)."""
+    if entry.is_dir(follow_symlinks=False):
+        return du(entry.path)
+    try:
+        return entry.stat(follow_symlinks=False).st_blocks * 512, 0
+    except OSError:
+        return 0, 1
+
+
+def entries(path):
+    with os.scandir(path) as it:
+        return sorted(it, key=lambda e: e.name)
+
+
+def scan(mount, names):
+    """Each top-level folder is measured child by child, in parallel: one du per child."""
+    errors = 0
+    tops = entries(mount)
+    jobs = {}   # (top name, child name or None) -> future
+    with cf.ThreadPoolExecutor(max_workers=WORKERS) as ex:
+        for t in tops:
+            if not t.is_dir(follow_symlinks=False):
+                jobs[(t.name, None)] = ex.submit(size_of, t)
+                continue
+            try:
+                kids = entries(t.path)
+            except OSError:
+                errors += 1
+                kids = []
+            jobs[(t.name, None)] = ex.submit(lambda p=t: (p.stat(follow_symlinks=False).st_blocks * 512, 0))
+            for c in kids:
+                jobs[(t.name, c.name)] = ex.submit(size_of, c)
+        sizes = {}
+        for key, f in jobs.items():
+            b, e = f.result()
+            errors += e
+            sizes[key] = b
+
+    users, shared, other = {}, {}, 0
+    for t in tops:
+        total = sum(b for (tn, _), b in sizes.items() if tn == t.name)
+        if not t.is_dir(follow_symlinks=False):
+            other += total
+        elif t.name in names:
+            users[t.name] = total
+        else:
+            kids = sorted(((c, b) for (tn, c), b in sizes.items() if tn == t.name and c is not None),
+                          key=lambda x: -x[1])
+            rest = kids[TOP_CHILDREN:]
+            shared[t.name] = {"size": total, "children": dict(kids[:TOP_CHILDREN]),
+                              "rest": sum(b for _, b in rest), "rest_count": len(rest)}
+    fs = fs_usage(mount)
+    measured = sum(users.values()) + sum(s["size"] for s in shared.values()) + other
+    return {"fs": fs, "users": users, "shared": shared, "other": other,
+            "unaccounted": max(fs["used"] - measured, 0), "errors": errors}
+
+
+def write_atomic(path, text):
+    d = os.path.dirname(path)
+    if not os.path.isdir(d):
+        raise SystemExit(f"{d} does not exist; not writing {path}")
+    tmp = os.path.join(d, ".truenas.json.tmp")
+    with open(tmp, "w") as f:
+        f.write(text)
+    os.chmod(tmp, 0o644)
+    os.replace(tmp, path)
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    ap.add_argument("--out", default=DEFAULT_OUT, help="output file, or - for stdout")
+    args = ap.parse_args()
+    if not os.path.ismount(MOUNT):
+        raise SystemExit(f"{MOUNT} is not mounted")
+    t0 = time.time()
+    r = scan(MOUNT, human_users())
+    doc = {
+        "schema": 1,
+        "path": MOUNT,
+        "generated_at": datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds"),
+        "scan_seconds": round(time.time() - t0, 1),
+        "complete": r["errors"] == 0,
+        "mounted": True,
+        **r,
+    }
+    text = json.dumps(doc, indent=1, sort_keys=True)
+    if args.out == "-":
+        sys.stdout.write(text + "\n")
+    else:
+        write_atomic(args.out, text + "\n")
+    print(f"{doc['generated_at']} truenas scan ok in {doc['scan_seconds']}s, errors={r['errors']}",
+          file=sys.stderr)
+
+
+if __name__ == "__main__":
+    main()

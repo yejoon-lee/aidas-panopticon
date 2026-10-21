@@ -8,11 +8,11 @@
 <style>
 :root { --fg:#1f2328; --muted:#656d76; --bg:#ffffff; --card:#f6f8fa; --border:#d0d7de; --track:#e6e8eb;
         --bar:#3b82f6; --warn:#d97706; --crit:#dc2626; --good:#16a34a;
-        --c-root:#4b535d; --c-data0:#08519c; --c-data1:#3182bd; --c-data2:#6baed6; --c-shared:#e69f00; }
+        --c-root:#4b535d; --c-data0:#08519c; --c-data1:#3182bd; --c-data2:#6baed6; --c-shared:#e69f00; --c-net:#009e73; }
 @media (prefers-color-scheme: dark) {
   :root { --fg:#e6edf3; --muted:#8d96a0; --bg:#0d1117; --card:#161b22; --border:#30363d; --track:#30363d;
           --bar:#4c8df6; --warn:#f0a020; --crit:#f85149; --good:#3fb950;
-          --c-root:#c9d1d9; --c-data0:#2f7fc1; --c-data1:#5fa8dc; --c-data2:#a2cdee; --c-shared:#e69f00; }
+          --c-root:#c9d1d9; --c-data0:#2f7fc1; --c-data1:#5fa8dc; --c-data2:#a2cdee; --c-shared:#e69f00; --c-net:#1fb589; }
 }
 * { box-sizing: border-box; }
 body { margin: 0; background: var(--bg); color: var(--fg);
@@ -76,6 +76,8 @@ th { color: var(--muted); font-weight: 500; font-size: 12px; }
 th:first-child, td:first-child { text-align: left; }
 tr.muted td { color: var(--muted); }
 tr.first-common td { border-top: 2px solid var(--border); }
+tr.child td { font-size: 12px; padding-top: 3px; padding-bottom: 3px; }
+tr.child td:first-child { padding-left: 26px; }
 .minibar { display: flex; align-items: center; gap: 8px; justify-content: flex-end; }
 .minibar .track { width: 110px; margin: 0; flex: none; }
 .up { color: var(--crit); } .down { color: var(--good); } .zero { color: var(--muted); }
@@ -89,7 +91,7 @@ tr.first-common td { border-top: 2px solid var(--border); }
 .legend .lg-group b { color: var(--fg); font-weight: 600; }
 .legend .lg { display: inline-flex; align-items: center; gap: 5px; }
 .legend .lg svg { display: block; overflow: visible; }
-.g-root { --c: var(--c-root); } .g-shared { --c: var(--c-shared); }
+.g-root { --c: var(--c-root); } .g-shared { --c: var(--c-shared); } .g-net { --c: var(--c-net); }
 .g-data.d0 { --c: var(--c-data0); } .g-data.d1 { --c: var(--c-data1); } .g-data.d2 { --c: var(--c-data2); }
 .chart .ln { fill: none; stroke: var(--c); stroke-width: 2; }
 .chart .mk { fill: var(--c); }
@@ -163,14 +165,18 @@ function kst(dt) {
 const now = kst(new Date(L.generated_at));
 const days = Object.keys(H).sort();
 const targetDay = kst(new Date(Date.parse(now.day + "T12:00:00+09:00") - 7 * 86400e3)).day;
-const older = days.filter(d => d < now.day);
-let baseDay = null;
-if (older.length) { const le = older.filter(d => d <= targetDay); baseDay = le.length ? le[le.length - 1] : older[0]; }
-const base = baseDay ? H[baseDay] : null;
-const dHead = !base || baseDay === targetDay ? "7-day change" : `Change since ${baseDay.slice(5).replace("-", "/")}`;
+function baseDayOf(space) {   // ~7 days ago, or the oldest earlier day that has this space
+  const older = days.filter(d => d < now.day && H[d][space]);
+  if (!older.length) return null;
+  const le = older.filter(d => d <= targetDay);
+  return le.length ? le[le.length - 1] : older[0];
+}
+const dHead = space => { const b = baseDayOf(space);
+  return !b || b === targetDay ? "7-day change" : `Change since ${b.slice(5).replace("-", "/")}`; };
 function change(space, name, cur) {
-  if (!base) return `<span class="zero">—</span>`;
-  const d = cur - ((base[space] || {})[name] || 0);
+  const baseDay = baseDayOf(space);
+  if (!baseDay) return `<span class="zero">—</span>`;
+  const d = cur - ((H[baseDay][space] || {})[name] || 0);
   if (Math.abs(d) < 0.5 * GiB) return `<span class="zero">0</span>`;
   return d > 0 ? `<span class="up">+${fmt(d)}</span>` : `<span class="down">${fmt(d)}</span>`;
 }
@@ -180,7 +186,7 @@ const tip = (label, text) => `<span class="tip" tabindex="0" data-tip="${esc(tex
 const help = text => `<span class="help" tabindex="0" role="button" aria-label="${esc(text)}" data-tip="${esc(text)}">?</span>`;
 const T = {
   about: `Read-only scan on aidas every hour at :05; this page updates about 15 min later.
-Sizes as in df -h (1G = 1024³ bytes). Network storage (/mnt/nas, /mnt/TrueNAS, …) is not included.`,
+Sizes as in df -h (1G = 1024³ bytes). /mnt/TrueNAS is included (its own scan); other network storage (/mnt/nas, /mnt/nasdata, /mnt/ece) is not.`,
   root: `Files each user owns anywhere on /, split by location. Only / has quotas.`,
   quota: `Usage counted toward the hard limit; writes fail at the limit. Should equal Total; if not, an admin can recount with quotacheck.`,
   data: `Everything inside each user's folder, whoever owns the files. The folders sit on three separate disks with no quotas, so one disk can fill up while others have room.`,
@@ -196,8 +202,12 @@ Sizes as in df -h (1G = 1024³ bytes). Network storage (/mnt/nas, /mnt/TrueNAS, 
   condaBase: `The shared miniconda3 install itself (everything except userenvs).`,
   rootOwned: `root's .cache, conda envs and Singularity files.`,
   sharedOther: `Other folders on this disk.`,
+  net: `NFS share from the lab TrueNAS (10.210.100.200) on a direct 10G cable: network storage, but about as fast as a local disk. Separate scan every 6 hours: one pass over its millions of small files takes about an hour (no root needed). A top-level folder named after a user counts as theirs, whoever owns the files; other top-level folders are shared and shown with their largest sub-folders. No quotas.`,
+  netShared: `A shared top-level folder (not named after a user).`,
+  netOther: `Files directly in /mnt/TrueNAS.`,
+  netNA: `Used space that isn't in any file: ZFS metadata and snapshots, or files deleted but still held open.`,
 };
-const changeTh = `<th>${tip(dHead, T.change)}</th>`;
+const changeTh = space => `<th>${tip(dHead(space), T.change)}</th>`;
 
 // ---- header
 const ageMin = (Date.now() - Date.parse(L.generated_at)) / 60000;
@@ -212,6 +222,8 @@ const anchorId = p => "disk-" + (p === "/" ? "root" : p.split("/").filter(Boolea
 const disks = [["/", "System + home folders", R.fs, true]];
 for (const [p, d] of Object.entries(L.data_disks)) disks.push([p, "User data folders", d.fs, d.mounted]);
 for (const [p, d] of Object.entries(L.shared_disk)) disks.push([p, "Shared caches + conda", d.fs, d.mounted]);
+const NET = L.network_disks || {};
+for (const [p, d] of Object.entries(NET)) disks.push([p, "Network storage (10G NFS)", d.fs, d.mounted]);
 const LINK_ICON = `<svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></svg>`;
 html += `<div class="cards">` + disks.map(([p, role, fs, mounted]) => {
   let body = `<div class="pct crit">not mounted</div>`;
@@ -233,7 +245,7 @@ const rootU = userParts(rootRows.map(r => [r.n, r.t]));
 html += `<section class="anchor" id="disk-root"><h2>/ (system disk)${help(T.root)}</h2>
 ${usage(R.fs, [...rootU.parts, {label: "System (root & services) + not attributable", bytes: sum(S) + R.unaccounted, color: GREY}])}
 <div class="scroll"><table><tr><th>User</th><th>/home</th><th>/tmp</th><th>/var/tmp</th><th>Other</th><th>Total</th>
-<th>${tip("Quota", T.quota)}</th>${changeTh}</tr>`;
+<th>${tip("Quota", T.quota)}</th>${changeTh("root")}</tr>`;
 for (const {n, u, t} of rootRows) {
   let q = "—";
   if (u.quota_hard > 0) q = minibar(`${fmt(u.quota_used)} / ${fmt(u.quota_hard)}`, u.quota_used / u.quota_hard);
@@ -256,7 +268,7 @@ for (const [p, d] of Object.entries(L.data_disks)) {
   const du = userParts(rows), cap = d.fs.used + d.fs.avail;
   html += `<div class="disk anchor" id="${anchorId(p)}"><h3>${esc(p)}</h3>
   ${usage(d.fs, [...du.parts, {label: "Other + not attributable", bytes: d.other + d.unaccounted, color: GREY}])}
-  <div class="scroll"><table><tr><th>User</th><th>Size</th><th>${tip("Share of disk", T.share)}</th>${changeTh}</tr>`;
+  <div class="scroll"><table><tr><th>User</th><th>Size</th><th>${tip("Share of disk", T.share)}</th>${changeTh("data")}</tr>`;
   for (const [n, b] of rows)
     html += `<tr><td>${sw(du.colors[n])}${esc(n)}</td><td><b>${fmt(b)}</b></td><td>${minibar(Math.round(b / cap * 100) + "%", b / cap, "", du.colors[n])}</td><td>${change("data", n, b)}</td></tr>`;
   html += `<tr class="muted first-common"><td>${sw(GREY)}Other (not a user folder)${help(T.dataOther)}</td><td>${fmt(d.other)}</td><td></td><td></td></tr>
@@ -278,7 +290,7 @@ for (const [p, d] of Object.entries(L.shared_disk)) {
     <th>${tip(".cache", "/mnt/data/.cache/<user>")}</th>
     <th>${tip("conda envs", "/mnt/data/miniconda3/userenvs/<user> (envs + package cache)")}</th>
     <th>${tip("Singularity", "/mnt/data/.singularity_cachedir/<user> + images the user owns in /mnt/data/singularity-images")}</th>
-    <th>${tip("Total", T.total)}</th>${changeTh}</tr>`;
+    <th>${tip("Total", T.total)}</th>${changeTh("shared")}</tr>`;
   for (const {n, u, t} of rows)
     html += `<tr><td>${sw(su.colors[n])}${esc(n)}</td><td>${fmt(u.cache)}</td><td>${fmt(u.conda)}</td><td>${fmt(u.singularity)}</td>
       <td>${minibar("<b>" + fmt(t) + "</b>", t / max, "", su.colors[n])}</td><td>${change("shared", n, t)}</td></tr>`;
@@ -290,6 +302,34 @@ for (const [p, d] of Object.entries(L.shared_disk)) {
   html += `<tr class="muted"><td>${sw(GREY)}Not attributable${help(T.na)}</td><td></td><td></td><td></td><td>${fmt(d.unaccounted)}</td><td></td></tr></table></div></section>`;
 }
 
+// ---- network storage (/mnt/TrueNAS): user folders + shared folders, like the data disks
+const SLATE = "#64748b";
+for (const [p, d] of Object.entries(NET)) {
+  const ageMin = (Date.now() - Date.parse(d.generated_at)) / 60000;
+  html += `<section class="anchor" id="${anchorId(p)}"><h2>Network storage (<code>${esc(p)}</code>)${help(T.net)}</h2>
+  <p class="sub">TrueNAS over NFS, direct 10G link · scanned ${kst(new Date(d.generated_at)).text} · scan took ${Math.max(1, Math.round(d.scan_seconds / 60))} min</p>`;
+  if (ageMin > 780) html += `<div class="banner">The last ${esc(p)} scan is ${Math.round(ageMin / 60)} hours old; its 6-hourly scan may be failing.</div>`;
+  if (!d.complete) html += `<div class="banner">Partial ${esc(p)} scan: some folders could not be read, so numbers are lower bounds.</div>`;
+  const rows = Object.entries(d.users).sort((a, b) => b[1] - a[1]);
+  const shared = Object.entries(d.shared).sort((a, b) => b[1].size - a[1].size);
+  const nu = userParts(rows), cap = d.fs.used + d.fs.avail;
+  const share = b => minibar(Math.round(b / cap * 100) + "%", b / cap, "", SLATE);
+  html += usage(d.fs, [...nu.parts,
+    ...shared.map(([n, f]) => ({label: `${n}/ (shared)`, bytes: f.size, color: SLATE})),
+    {label: "Other + not attributable", bytes: d.other + d.unaccounted, color: GREY}]);
+  html += `<div class="scroll"><table><tr><th>User / folder</th><th>Size</th><th>${tip("Share of disk", T.share)}</th>${changeTh("net")}</tr>`;
+  for (const [n, b] of rows)
+    html += `<tr><td>${sw(nu.colors[n])}${esc(n)}</td><td><b>${fmt(b)}</b></td><td>${minibar(Math.round(b / cap * 100) + "%", b / cap, "", nu.colors[n])}</td><td>${change("net", n, b)}</td></tr>`;
+  shared.forEach(([n, f], i) => {
+    html += `<tr class="${i === 0 ? "first-common" : ""}"><td>${sw(SLATE)}${esc(n)}/ <span class="zero">shared</span>${help(T.netShared)}</td><td><b>${fmt(f.size)}</b></td><td>${share(f.size)}</td><td></td></tr>`;
+    for (const [c, b] of Object.entries(f.children).sort((a, b) => b[1] - a[1]))
+      html += `<tr class="muted child"><td>└ ${esc(c)}</td><td>${fmt(b)}</td><td></td><td></td></tr>`;
+    if (f.rest_count) html += `<tr class="muted child"><td>└ ${f.rest_count} more</td><td>${fmt(f.rest)}</td><td></td><td></td></tr>`;
+  });
+  html += `<tr class="muted${shared.length ? "" : " first-common"}"><td>${sw(GREY)}Other (top-level files)${help(T.netOther)}</td><td>${fmt(d.other)}</td><td></td><td></td></tr>
+  <tr class="muted"><td>${sw(GREY)}Not attributable${help(T.netNA)}</td><td>${fmt(d.unaccounted)}</td><td></td><td></td></tr></table></div></section>`;
+}
+
 // ---- history chart: % used per disk, one point per day, last 30 days.
 // Grouped by disk type and colorblind-safe: hue = type (grey / blues / orange), shade + marker tell the data disks apart.
 html += `<h2>Disk usage, last 30 days${help(T.history)}</h2>`;
@@ -299,12 +339,14 @@ const styleOf = n => {
   if (n === "/") return {cls: "g-root", label: "system disk", marker: "ring"};
   const i = dataDiskNames.indexOf(n);
   if (i >= 0) return {cls: `g-data d${i % 3}`, group: "data", label: "data disk", marker: ["circle", "square", "triangle"][i % 3]};
+  if (n in NET) return {cls: "g-net", group: "net", label: "network storage", marker: "tdown"};
   return {cls: "g-shared", label: "shared disk", marker: "diamond"};
 };
 const marker = (m, cx, cy) => {
   const f = v => v.toFixed(1);
   if (m === "square") return `<rect class="mk" x="${f(cx - 3)}" y="${f(cy - 3)}" width="6" height="6"/>`;
   if (m === "triangle") return `<path class="mk" d="M${f(cx)} ${f(cy - 4)}L${f(cx + 3.8)} ${f(cy + 2.8)}L${f(cx - 3.8)} ${f(cy + 2.8)}Z"/>`;
+  if (m === "tdown") return `<path class="mk" d="M${f(cx)} ${f(cy + 4)}L${f(cx + 3.8)} ${f(cy - 2.8)}L${f(cx - 3.8)} ${f(cy - 2.8)}Z"/>`;
   if (m === "diamond") return `<path class="mk" d="M${f(cx)} ${f(cy - 4.2)}L${f(cx + 4.2)} ${f(cy)}L${f(cx)} ${f(cy + 4.2)}L${f(cx - 4.2)} ${f(cy)}Z"/>`;
   if (m === "ring") return `<circle class="mk ring" cx="${f(cx)}" cy="${f(cy)}" r="3.4"/>`;
   return `<circle class="mk" cx="${f(cx)}" cy="${f(cy)}" r="3.2"/>`;
@@ -349,7 +391,8 @@ if (!days.length) {
   };
   const groups = [["System", names.filter(n => n === "/")],
                   ["Data disks", names.filter(n => styleOf(n).group === "data")],
-                  ["Shared", names.filter(n => n !== "/" && styleOf(n).group !== "data")]];
+                  ["Shared", names.filter(n => n !== "/" && !styleOf(n).group)],
+                  ["Network", names.filter(n => styleOf(n).group === "net")]];
   html += `<div class="chart">${svg}<div class="legend">${groups.filter(([, ns]) => ns.length)
     .map(([label, ns]) => `<span class="lg-group"><b>${label}</b>${ns.map(item).join("")}</span>`).join("")}</div></div>`;
   chart = {x, byName};
