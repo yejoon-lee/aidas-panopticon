@@ -11,7 +11,8 @@ Hourly storage-usage dashboard for the AIDAS-A100 lab server: **https://yejoon.m
    `/mnt/TrueNAS` has its own scan (`aidas/truenas-scan`, yejoon's crontab, every 6 hours, no root; see below)
    writing `truenas.json` next to it, so a slow NAS cannot hold up the other disks.
 2. **Publish** (yejoon's crontab on aidas, every 15 min). `publish.py` reads both files. When it is a new scan
-   with the expected shape, it keeps one snapshot per KST day for 30 days (`state/history.json`), renders
+   with the expected shape, it keeps one snapshot per KST day for 30 days (`state/history.json`) and each
+   week's last one for 27 weeks (`state/weekly.json`; the chart's "6 months" view), renders
    `template.html`, and force-pushes one commit (`index.html`, `data.json`) to `gh-pages` with a deploy key
    that can push to this repository only. If GitHub's port 22 is blocked it uses port 443. Errors go to
    `publish.log`, once per distinct error.

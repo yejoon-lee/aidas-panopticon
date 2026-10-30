@@ -3,7 +3,9 @@
 
 Runs on aidas as an ordinary user, from crontab every 15 minutes. Reads the hourly scan
 (/mnt/TrueNAS/yejoon/aidas-storage/latest.json, written by the root job in aidas/) and the
-/mnt/TrueNAS scan next to it (truenas.json, from aidas/truenas-scan), checks their shape, keeps one snapshot per day for 30 days, renders template.html into a static page, and
+/mnt/TrueNAS scan next to it (truenas.json, from aidas/truenas-scan), checks their shape, keeps one
+snapshot per day for 30 days and one per week (the week's last day) for 27 weeks, renders
+template.html into a static page, and
 force-pushes it as a single commit to the gh-pages branch of yejoon-lee/aidas-panopticon with a
 deploy key that can push to this repository only (~/.ssh/aidas_panopticon_deploy).
 Does nothing when neither scan is new.
@@ -31,6 +33,7 @@ if sys.version_info < (3, 7):
 HERE = pathlib.Path(__file__).resolve().parent
 STATE = HERE / "state"
 HISTORY = STATE / "history.json"
+WEEKLY = STATE / "weekly.json"
 PUBLISHED = STATE / "published_at.txt"
 LAST_ERROR = STATE / "last_error.txt"
 LOCK = STATE / "publish.lock"
@@ -50,6 +53,7 @@ AUTHOR_NAME, AUTHOR_EMAIL = "yejoon-lee", "50051856+yejoon-lee@users.noreply.git
 GIT = shutil.which("git") or "/usr/bin/git"
 KST = datetime.timezone(datetime.timedelta(hours=9))
 KEEP_DAYS = 30
+KEEP_WEEKS = 27   # covers the page's 6-month chart
 NAME_RE = re.compile(r"[a-z_][a-z0-9_.-]{0,31}")
 DISK_RE = re.compile(r"/[A-Za-z0-9_./-]{0,63}")
 FOLDER_RE = re.compile(r"[^/\x00-\x1f\x7f]{1,128}")   # NAS folder names; the page escapes them
@@ -189,15 +193,19 @@ def _snapshot_ok(day, s):
         return False
 
 
-def seed_history():
+def _live(key):
     """First run on a new machine: start from the history the live page already shows."""
     try:
         with urllib.request.urlopen(LIVE_DATA, timeout=30) as r:
-            hist = json.loads(r.read(MAX_BYTES))["history"]
-        hist = {d: s for d, s in sorted(hist.items()) if _snapshot_ok(d, s)}
+            hist = json.loads(r.read(MAX_BYTES))[key]
+        return {d: s for d, s in sorted(hist.items()) if _snapshot_ok(d, s)}
     except Exception as e:  # noqa: BLE001 - starting with an empty history is fine
-        log(f"no history copied from the live page ({type(e).__name__}: {e})")
-        return {}
+        log(f"no {key} copied from the live page ({type(e).__name__}: {e})")
+        return None
+
+
+def seed_history():
+    hist = _live("history") or {}
     HISTORY.write_text(json.dumps(hist, indent=1, sort_keys=True) + "\n")
     log(f"copied {len(hist)} days of history from the live page")
     return hist
@@ -216,6 +224,28 @@ def update_history(doc):
     hist = {k: v for k, v in sorted(hist.items()) if datetime.date.fromisoformat(k) >= cutoff}
     HISTORY.write_text(json.dumps(hist, indent=1, sort_keys=True) + "\n")
     return hist
+
+
+def _week(day):
+    """Monday of the (KST) week of an ISO date."""
+    d = datetime.date.fromisoformat(day)
+    return (d - datetime.timedelta(days=d.weekday())).isoformat()
+
+
+def update_weekly(hist):
+    """Keep the last daily snapshot of each week, for the last KEEP_WEEKS weeks. Weeks still in the
+    daily history are recomputed from it, so the first run fills them in; older ones are kept as stored."""
+    new = not WEEKLY.exists()
+    weekly = (_live("weekly") or {}) if new else json.loads(WEEKLY.read_text())
+    for day, snap in sorted(hist.items()):   # later days overwrite earlier ones of the same week
+        weekly[_week(day)] = snap
+    if new:
+        log(f"started the weekly history: {len(weekly)} weeks (live page + daily history)")
+    if hist:
+        cutoff = datetime.date.fromisoformat(_week(max(hist))) - datetime.timedelta(weeks=KEEP_WEEKS - 1)
+        weekly = {k: v for k, v in sorted(weekly.items()) if datetime.date.fromisoformat(k) >= cutoff}
+    WEEKLY.write_text(json.dumps(weekly, indent=1, sort_keys=True) + "\n")
+    return weekly
 
 
 def render(payload):
@@ -310,7 +340,8 @@ def main():
     if stamp == last and not args.force:
         return 0
     hist = update_history(doc) if doc.get("complete") else load_history()
-    payload = {"latest": doc, "history": hist}
+    weekly = update_weekly(hist)
+    payload = {"latest": doc, "history": hist, "weekly": weekly}
     html = render(payload)
     if args.out:
         write_site(pathlib.Path(args.out), html, payload)
@@ -331,7 +362,7 @@ def main():
     via = f" via {used}" if used != remotes[0] else ""
     log(f"published scan {doc['generated_at']} (complete={doc.get('complete')}, "
         f"TrueNAS {net['generated_at'] if net else 'not used: ' + str(net_err)}, "
-        f"{len(hist)} days of history){via}")
+        f"{len(hist)} days + {len(weekly)} weeks of history){via}")
     return 0
 
 

@@ -83,9 +83,17 @@ tr.child td:first-child { padding-left: 26px; }
 .up { color: var(--crit); } .down { color: var(--good); } .zero { color: var(--muted); }
 .disk { margin-top: 18px; }
 .chart { margin-top: 10px; }
-.chart > svg { width: 100%; height: auto; display: block; }
+.chart .plot > svg { width: 100%; height: auto; display: block; }
 .chart text { fill: var(--muted); font-size: 11px; }
 .chart .grid { stroke: var(--border); stroke-width: 1; }
+.hist-head { display: flex; align-items: center; flex-wrap: wrap; gap: 6px 0; }
+.range { display: inline-flex; margin-left: auto; border: 1px solid var(--border); border-radius: 6px; overflow: hidden; }
+.range button { font: 500 12px/1.4 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; padding: 3px 10px; border: 0;
+                background: var(--card); color: var(--muted); cursor: pointer; }
+.range button + button { border-left: 1px solid var(--border); }
+.range button:hover { color: var(--fg); }
+.range button[aria-pressed="true"] { background: var(--bar); color: #fff; }
+.range button:focus-visible { outline: 2px solid var(--bar); outline-offset: -2px; }
 .legend { display: flex; flex-wrap: wrap; gap: 8px 22px; font-size: 12px; color: var(--muted); margin-top: 6px; }
 .legend .lg-group { display: inline-flex; flex-wrap: wrap; align-items: center; gap: 4px 12px; }
 .legend .lg-group b { color: var(--fg); font-weight: 600; }
@@ -191,7 +199,7 @@ Sizes as in df -h (1G = 1024³ bytes). /mnt/TrueNAS is included (its own scan); 
   quota: `Usage counted toward the hard limit; writes fail at the limit. Should equal Total; if not, an admin can recount with quotacheck.`,
   data: `Everything inside each user's folder, whoever owns the files. The folders sit on three separate disks with no quotas, so one disk can fill up while others have room.`,
   shared: `Shared caches and software, reached via /mnt/data. No quotas.`,
-  history: `% used per disk, one point per day, last 30 days.`,
+  history: `% used per disk. 30 days: one point per day. 6 months: one point per week (its last daily scan).`,
   share: `Size ÷ (used + free); shares add up to the disk's %.`,
   total: `Bars are relative to the largest user.`,
   change: `Compared with 7 days ago (or the oldest day available). Under 0.5G shows as 0.`,
@@ -330,10 +338,18 @@ for (const [p, d] of Object.entries(NET)) {
   <tr class="muted"><td>${sw(GREY)}Not attributable${help(T.netNA)}</td><td>${fmt(d.unaccounted)}</td><td></td><td></td></tr></table></div></section>`;
 }
 
-// ---- history chart: % used per disk, one point per day, last 30 days.
+// ---- history chart: % used per disk. "30 days" (default): one point per day from the daily history;
+// "6 months": one point per week (the week's last daily scan) from the weekly history.
 // Grouped by disk type and colorblind-safe: hue = type (grey / blues / orange), shade + marker tell the data disks apart.
-html += `<h2>Disk usage, last 30 days${help(T.history)}</h2>`;
-let chart = null;
+const WK = D.weekly || {};
+const RANGES = {
+  "30d": {label: "30 days", span: 29, points: () => days.map(d => ({day: d, snap: H[d]}))},
+  "6m": {label: "6 months", span: 182, points: () => Object.keys(WK).sort()
+    .map(w => ({day: kst(new Date(WK[w].generated_at)).day, week: w, snap: WK[w]}))},
+};
+html += `<h2 class="hist-head">Disk usage over time${help(T.history)}${days.length ? `<span class="range" role="group" aria-label="Time range">${
+  Object.entries(RANGES).map(([k, r]) => `<button type="button" data-range="${k}" aria-pressed="${k === "30d"}">${r.label}</button>`).join("")}</span>` : ""}</h2>`;
+let chart = null;   // the range on screen: {x, byName}
 const dataDiskNames = Object.keys(L.data_disks);
 const styleOf = n => {
   if (n === "/") return {cls: "g-root", label: "system disk", marker: "ring"};
@@ -352,38 +368,54 @@ const marker = (m, cx, cy) => {
   return `<circle class="mk" cx="${f(cx)}" cy="${f(cy)}" r="3.2"/>`;
 };
 const shortName = n => n === "/" ? "/" : n.split("/").pop();
-if (!days.length) {
-  html += `<p class="note">History starts with the first complete scan (one point per day).</p>`;
-} else {
-  const W = 800, Ht = 220, padL = 36, padR = 10, padT = 10, padB = 24;
-  const endMs = Date.parse(now.day + "T12:00:00+09:00"), startMs = endMs - 29 * 86400e3;
+const md = day => day.slice(5).replace("-", "/");
+const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+const names = disks.map(d => d[0]);
+function drawChart(key) {
+  const rg = RANGES[key], W = 800, Ht = 220, padL = 36, padR = 10, padT = 10, padB = 24;
+  const endMs = Date.parse(now.day + "T12:00:00+09:00"), startMs = endMs - rg.span * 86400e3;
+  const startDay = kst(new Date(startMs)).day;
   const x = day => padL + (Date.parse(day + "T12:00:00+09:00") - startMs) / (endMs - startMs) * (W - padL - padR);
-  const names = disks.map(d => d[0]);
-  const byName = Object.fromEntries(names.map(n => [n, days.map(day => {
-    const f = (H[day].fs || {})[n];
-    return f ? [day, f.used / (f.used + f.avail)] : null;
+  const pts = rg.points().filter(p => p.day >= startDay && p.day <= now.day);
+  const byName = Object.fromEntries(names.map(n => [n, pts.map(p => {
+    const f = (p.snap.fs || {})[n];
+    return f ? {day: p.day, week: p.week, v: f.used / (f.used + f.avail)} : null;
   }).filter(Boolean)]));
-  const all = Object.values(byName).flat().map(p => p[1]);
+  const all = Object.values(byName).flat().map(p => p.v);
+  if (!all.length) return {svg: "", note: "No history yet.", x, byName};
   const yMin = Math.max(0, Math.floor((Math.min(...all) * 100 - 5) / 10) * 10) / 100;
   const y = v => padT + (1 - (v - yMin) / (1 - yMin)) * (Ht - padT - padB);
-  let svg = `<svg viewBox="0 0 ${W} ${Ht}" role="img" aria-label="Disk usage history">`;
+  let svg = `<svg viewBox="0 0 ${W} ${Ht}" role="img" aria-label="Disk usage, last ${rg.label}">`;
   for (let g = Math.round(yMin * 100); g <= 100; g += 10)
     svg += `<line class="grid" x1="${padL}" x2="${W - padR}" y1="${y(g / 100)}" y2="${y(g / 100)}"/><text x="${padL - 6}" y="${y(g / 100) + 4}" text-anchor="end">${g}%</text>`;
-  for (let i = 0; i < 28; i += 7) {
-    const day = kst(new Date(startMs + i * 86400e3)).day;
-    svg += `<text x="${x(day)}" y="${Ht - 6}" text-anchor="middle">${day.slice(5).replace("-", "/")}</text>`;
+  const ticks = [];   // [day, label]: every 7 days, or each month start
+  if (key === "30d") for (let i = 0; i < 28; i += 7) { const d = kst(new Date(startMs + i * 86400e3)).day; ticks.push([d, md(d)]); }
+  else for (let [yr, mo] = startDay.split("-").map(Number); ; ) {
+    if (++mo > 12) { mo = 1; yr++; }
+    const d = `${yr}-${String(mo).padStart(2, "0")}-01`;
+    if (d > now.day) break;
+    ticks.push([d, MONTHS[mo - 1] + (mo === 1 ? ` '${String(yr).slice(2)}` : "")]);
   }
-  svg += `<text x="${x(now.day)}" y="${Ht - 6}" text-anchor="end">${now.day.slice(5).replace("-", "/")}</text>`;
+  for (const [d, label] of ticks)   // month labels keep clear of the y labels; all keep clear of today's label
+    if ((key === "30d" || x(d) > padL + 12) && x(d) < x(now.day) - 44) svg += `<text x="${x(d)}" y="${Ht - 6}" text-anchor="middle">${label}</text>`;
+  svg += `<text x="${x(now.day)}" y="${Ht - 6}" text-anchor="end">${md(now.day)}</text>`;
   for (const n of names) {
-    const pts = byName[n], s = styleOf(n);
-    if (!pts.length) continue;
-    const poly = pts.map(([d, v]) => `${x(d).toFixed(1)},${y(v).toFixed(1)}`).join(" ");
+    const ps = byName[n], s = styleOf(n);
+    if (!ps.length) continue;
+    const poly = ps.map(p => `${x(p.day).toFixed(1)},${y(p.v).toFixed(1)}`).join(" ");
     svg += `<g class="series ${s.cls}" data-series="${esc(n)}">
       <polyline class="ln" points="${poly}"/>
-      ${pts.map(([d, v]) => marker(s.marker, x(d), y(v))).join("")}
+      ${ps.map(p => marker(s.marker, x(p.day), y(p.v))).join("")}
       <polyline class="hit" points="${poly}"/></g>`;
   }
   svg += `</svg>`;
+  const first = pts.length ? pts[0].day : null, step = key === "30d" ? 1 : 7;
+  const note = first && Date.parse(first) - Date.parse(startDay) > step * 86400e3 ? `History starts ${md(first)}.` : "";
+  return {svg, note, x, byName};
+}
+if (!days.length) {
+  html += `<p class="note">History starts with the first complete scan (one point per day).</p>`;
+} else {
   const item = n => {
     const s = styleOf(n);
     return `<span class="lg ${s.cls}" data-series="${esc(n)}"><svg width="28" height="10" viewBox="0 0 28 10" aria-hidden="true">
@@ -393,9 +425,8 @@ if (!days.length) {
                   ["Data disks", names.filter(n => styleOf(n).group === "data")],
                   ["Shared", names.filter(n => n !== "/" && !styleOf(n).group)],
                   ["Network", names.filter(n => styleOf(n).group === "net")]];
-  html += `<div class="chart">${svg}<div class="legend">${groups.filter(([, ns]) => ns.length)
+  html += `<div class="chart"><div class="plot"></div><p class="note hist-note" hidden></p><div class="legend">${groups.filter(([, ns]) => ns.length)
     .map(([label, ns]) => `<span class="lg-group"><b>${label}</b>${ns.map(item).join("")}</span>`).join("")}</div></div>`;
-  chart = {x, byName};
 }
 
 app.innerHTML = html;
@@ -424,7 +455,7 @@ document.querySelectorAll("[data-tip]").forEach(el => {
 document.addEventListener("click", hideTip);
 window.addEventListener("scroll", hideTip, {passive: true});
 
-// ---- history chart: hovering a line (or its legend entry) highlights it and labels it
+// ---- history chart: the range switch, and hovering a line (or its legend entry) highlights it and labels it
 function showTipAt(text, cx, cy) {
   tipEl.textContent = text;
   tipEl.classList.add("show");
@@ -432,24 +463,39 @@ function showTipAt(text, cx, cy) {
   tipEl.style.left = Math.max(8, Math.min(cx + 12, window.innerWidth - w - 8)) + "px";
   tipEl.style.top = (cy + 16 + h > window.innerHeight - 8 ? cy - 10 - h : cy + 16) + "px";
 }
-const chartSvg = document.querySelector(".chart > svg");
-if (chart && chartSvg) {
+const plot = document.querySelector(".chart .plot"), histNote = document.querySelector(".hist-note");
+const rangeBtns = document.querySelectorAll(".range button");
+function showRange(key) {
+  const c = drawChart(key);
+  plot.innerHTML = c.svg;
+  histNote.textContent = c.note;
+  histNote.hidden = !c.note;
+  chart = c;
+  rangeBtns.forEach(b => b.setAttribute("aria-pressed", String(b.dataset.range === key)));
+}
+if (plot) {
+  showRange("30d");
+  rangeBtns.forEach(b => b.addEventListener("click", () => { hideTip(); showRange(b.dataset.range); }));
+  const svgEl = () => plot.querySelector("svg");
   const highlight = name => {
-    chartSvg.classList.toggle("hovering", !!name);
-    chartSvg.querySelectorAll(".series").forEach(s => s.classList.toggle("on", s.dataset.series === name));
+    const s = svgEl();
+    if (!s) return;
+    s.classList.toggle("hovering", !!name);
+    s.querySelectorAll(".series").forEach(g => g.classList.toggle("on", g.dataset.series === name));
   };
   const onChart = e => {
-    const g = e.target.closest(".series");
+    const g = e.target.closest(".series"), s = svgEl();
     highlight(g ? g.dataset.series : null);
-    if (!g) { hideTip(); return; }
+    if (!g || !s) { hideTip(); return; }
     const name = g.dataset.series, pts = chart.byName[name];
-    const p = new DOMPoint(e.clientX, e.clientY).matrixTransform(chartSvg.getScreenCTM().inverse());
-    const [day, v] = pts.reduce((a, b) => Math.abs(chart.x(b[0]) - p.x) < Math.abs(chart.x(a[0]) - p.x) ? b : a);
-    showTipAt(`${name} (${styleOf(name).label})\n${day.slice(5).replace("-", "/")}: ${(v * 100).toFixed(1)}% used`, e.clientX, e.clientY);
+    const p = new DOMPoint(e.clientX, e.clientY).matrixTransform(s.getScreenCTM().inverse());
+    const q = pts.reduce((a, b) => Math.abs(chart.x(b.day) - p.x) < Math.abs(chart.x(a.day) - p.x) ? b : a);
+    const when = q.week ? `Week of ${md(q.week)} (scan of ${md(q.day)})` : md(q.day);
+    showTipAt(`${name} (${styleOf(name).label})\n${when}: ${(q.v * 100).toFixed(1)}% used`, e.clientX, e.clientY);
   };
-  chartSvg.addEventListener("mousemove", onChart);
-  chartSvg.addEventListener("click", e => { e.stopPropagation(); onChart(e); });   // touch screens
-  chartSvg.addEventListener("mouseleave", () => { highlight(null); hideTip(); });
+  plot.addEventListener("mousemove", onChart);
+  plot.addEventListener("click", e => { e.stopPropagation(); onChart(e); });   // touch screens
+  plot.addEventListener("mouseleave", () => { highlight(null); hideTip(); });
   document.querySelectorAll(".legend .lg").forEach(item => {
     item.addEventListener("mouseenter", () => highlight(item.dataset.series));
     item.addEventListener("mouseleave", () => highlight(null));
