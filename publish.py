@@ -196,7 +196,9 @@ def _snapshot_ok(day, s):
 def _live(key):
     """First run on a new machine: start from the history the live page already shows."""
     try:
-        with urllib.request.urlopen(LIVE_DATA, timeout=30) as r:
+        # Cloudflare (in front of yejoon.me) answers Python's default User-Agent with 403
+        req = urllib.request.Request(LIVE_DATA, headers={"User-Agent": "aidas-panopticon publisher"})
+        with urllib.request.urlopen(req, timeout=30) as r:
             hist = json.loads(r.read(MAX_BYTES))[key]
         return {d: s for d, s in sorted(hist.items()) if _snapshot_ok(d, s)}
     except Exception as e:  # noqa: BLE001 - starting with an empty history is fine
